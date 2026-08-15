@@ -45,6 +45,9 @@ export default function BattlePage({ onBack }) {
   const [results, setResults] = useState([]);
   const [battleStatus, setBattleStatus] = useState('idle'); // idle | running | done | stopped
   const [viewMode, setViewMode] = useState('answer');
+  // Per-card view overrides — each sandbox's Code/Answer buttons only affect
+  // that card. Key: `${taskIndex}:${panelId}` → 'answer' | 'code'.
+  const [cardViews, setCardViews] = useState({});
   const [blind, setBlind] = useState({ enabled: false, order: null, revealed: true });
   const [savedReport, setSavedReport] = useState('');
   const [explorerPanel, setExplorerPanel] = useState(null); // null | panel object
@@ -235,9 +238,21 @@ export default function BattlePage({ onBack }) {
     return `Panel ${String.fromCharCode(65 + Math.max(0, idx))}`;
   };
 
+  // Effective view for one card: its own override, or the toolbar default.
+  const viewFor = (taskIndex, panelId) => cardViews[`${taskIndex}:${panelId}`] || viewMode;
+  // A card's own Code/Answer buttons only affect that card.
+  const setCardView = (taskIndex, panelId, mode) =>
+    setCardViews((prev) => ({ ...prev, [`${taskIndex}:${panelId}`]: mode }));
+  // The toolbar Answer/Code applies to every card — drop per-card overrides.
+  const setGlobalView = (mode) => {
+    setViewMode(mode);
+    setCardViews({});
+  };
+
   async function startBattle() {
     if (!repo || battleStatus === 'running') return;
     setResults(tasks.map((t) => ({ task: t, panels: { acc: { status: 'pending' }, plain: { status: 'pending' } } })));
+    setCardViews({});
     setBattleStatus('running');
 
     for (let i = 0; i < tasks.length; i++) {
@@ -488,7 +503,7 @@ export default function BattlePage({ onBack }) {
                         data-on={viewMode === 'answer'}
                         aria-selected={viewMode === 'answer'}
                         className="view-tab flex min-h-8 items-center gap-1.5 rounded-lg px-2.5 text-[11px] text-[var(--color-ink-dim)] transition-colors sm:px-3"
-                        onClick={() => setViewMode('answer')}
+                        onClick={() => setGlobalView('answer')}
                       >
                         <Icon name="text" className="size-4" />
                         <span className="hidden sm:inline">Answer</span>
@@ -499,7 +514,7 @@ export default function BattlePage({ onBack }) {
                         data-on={viewMode === 'code'}
                         aria-selected={viewMode === 'code'}
                         className="view-tab flex min-h-8 items-center gap-1.5 rounded-lg px-2.5 text-[11px] text-[var(--color-ink-dim)] transition-colors sm:px-3"
-                        onClick={() => setViewMode('code')}
+                        onClick={() => setGlobalView('code')}
                       >
                         <Icon name="code" className="size-4" />
                         <span className="hidden sm:inline">Code</span>
@@ -589,8 +604,8 @@ export default function BattlePage({ onBack }) {
                         panel={p}
                         result={r.panels[p.id]}
                         context={p.acc ? repo?.accContext : repo?.baseContext}
-                        viewMode={viewMode}
-                        onViewMode={setViewMode}
+                        viewMode={viewFor(i, p.id)}
+                        onViewMode={(mode) => setCardView(i, p.id, mode)}
                         blind={blind.enabled && !blind.revealed}
                         alias={aliasFor(p.id)}
                         best={winners.get(p.id)}
