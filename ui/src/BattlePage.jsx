@@ -594,6 +594,7 @@ export default function BattlePage({ onBack }) {
                         blind={blind.enabled && !blind.revealed}
                         alias={aliasFor(p.id)}
                         best={winners.get(p.id)}
+                        repoName={repo?.name}
                       />
                     ))}
                     <div className="col-span-full">

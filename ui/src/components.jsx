@@ -154,7 +154,7 @@ export function dotColor(state) {
   return 'bg-emerald-400';
 }
 
-export function ResultCard({ panel, result, context, viewMode, onViewMode, blind, alias, best }) {
+export function ResultCard({ panel, result, context, viewMode, onViewMode, blind, alias, best, repoName }) {
   const provider = getProvider(panel.provider);
   const name = blind ? alias : `${provider.label} · ${panel.model}`;
   const state = result?.status || 'pending';
@@ -246,7 +246,7 @@ export function ResultCard({ panel, result, context, viewMode, onViewMode, blind
             </div>
             <div className="h-[calc(100%-2.5rem)]">
               {viewMode === 'code' ? (
-                <CodeSandbox panel={panel} />
+                <CodeSandbox panel={panel} repoName={repoName} />
               ) : (
                 <div className="h-full overflow-auto p-3.5 text-[12px] leading-relaxed text-[var(--color-ink-dim)]">
                   <div className="flex items-center gap-1.5 pb-2 text-[10px] uppercase tracking-[0.18em] text-[var(--color-ink-faint)]">
@@ -288,7 +288,7 @@ export function ResultCard({ panel, result, context, viewMode, onViewMode, blind
               {viewMode === 'code' ? (
                 // Code view = the panel's sandbox: real repository files
                 // (including the agent's edits), browsable live.
-                <CodeSandbox panel={panel} />
+                <CodeSandbox panel={panel} repoName={repoName} />
               ) : (
                 <div className="h-full overflow-auto p-3.5 text-[12px] leading-relaxed text-[var(--color-ink-dim)]">
                   <div className="whitespace-pre-wrap break-words">{answer || result.output}</div>

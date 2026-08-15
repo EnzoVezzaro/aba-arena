@@ -8,7 +8,7 @@ import { Icon } from './components.jsx';
  * the Code view inside each result card, so clicking "Code" shows the real
  * repository code of that sandbox, not just the code in the model's answer.
  */
-export default function CodeSandbox({ panel }) {
+export default function CodeSandbox({ panel, repoName }) {
   const panelId = panel?.id || 'acc';
   const [tree, setTree] = useState(null);
   const [error, setError] = useState('');
@@ -90,11 +90,24 @@ export default function CodeSandbox({ panel }) {
   }
 
   return (
-    <div className="flex h-full min-h-0">
+    <div className="flex h-full min-h-0 flex-col">
+      {/* header: which repo this sandbox contains (the battle repo, not the engine) */}
+      <div className="flex items-center justify-between gap-2 border-b border-[var(--color-line)] px-3 py-1.5">
+        <span className="flex min-w-0 items-center gap-1.5 text-[10px] text-[var(--color-ink-dim)]">
+          <Icon name="folder" className="size-3 shrink-0 text-[var(--color-accent)]" />
+          <span className="truncate font-medium text-[var(--color-ink)]">{repoName || 'repo'}</span>
+          <span className="shrink-0 text-[var(--color-ink-faint)]">· sandbox</span>
+        </span>
+        <span className="flex shrink-0 items-center gap-1 text-[9px] text-[var(--color-ink-faint)]">
+          <Icon name="check" className="size-2.5 text-emerald-400" />
+          <span>live</span>
+        </span>
+      </div>
+      <div className="flex min-h-0 flex-1">
       {/* file tree */}
       <div className="no-scrollbar w-[min(40%,260px)] shrink-0 overflow-y-auto border-r border-[var(--color-line)] p-2">
         <p className="px-2 pb-1.5 pt-1 font-pixel text-[9px] uppercase tracking-[0.14em] text-[var(--color-ink-faint)]">
-          sandbox files
+          files
         </p>
         {error && <p className="px-2 text-[11px] text-red-400">{error}</p>}
         {!tree && !error && <p className="px-2 text-[11px] text-[var(--color-ink-faint)]">loading…</p>}
@@ -134,6 +147,7 @@ export default function CodeSandbox({ panel }) {
             <pre className="whitespace-pre-wrap break-words p-3 font-mono text-[10.5px] leading-relaxed text-[var(--color-ink-dim)]">{content}</pre>
           )}
         </div>
+      </div>
       </div>
     </div>
   );

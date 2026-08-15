@@ -107,7 +107,10 @@ function buildTree(root) {
   return shown.join('\n');
 }
 
-const SKIP_SANDBOX_DIRS = new Set(['.git', 'node_modules', '.acc', 'dist', 'build', 'coverage']);
+// .acc is NOT skipped — the ACC panel's sandbox must show the framework
+// installed inside the repo (acc init creates it). Only VCS, deps and build
+// noise are hidden.
+const SKIP_SANDBOX_DIRS = new Set(['.git', 'node_modules', 'dist', 'build', 'coverage']);
 
 /** Recursive file tree for the sandbox explorer: [{ path, type, size, children }]. */
 function buildSandboxTree(root, target) {
