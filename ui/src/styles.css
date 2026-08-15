@@ -1,0 +1,360 @@
+@import "tailwindcss";
+
+/* Fonts (Bricolage Grotesque + JetBrains Mono) are loaded via <link> in
+   index.html — same Google Fonts import as the ACC landing page. */
+
+/* ---------------------------------- Theme --------------------------------- */
+/* ACC design tokens — identical to the landing page (docs/.vitepress/theme/custom.css):
+   light surface · committed-red primary · black ink. */
+@theme {
+  --font-pixel: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-pixel-line: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-code: Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  --font-sans: "Bricolage Grotesque", ui-sans-serif, system-ui, sans-serif;
+
+  --color-ink: oklch(0.18 0.012 355);
+  --color-ink-dim: oklch(0.42 0.014 355);
+  --color-ink-faint: oklch(0.55 0.014 355);
+  --color-surface: oklch(1 0 0);
+  --color-panel: oklch(0.975 0.005 355);
+  --color-panel-hi: oklch(0.945 0.008 355);
+  --color-line: oklch(0.9 0.006 355);
+  --color-line-hi: oklch(0.82 0.01 355);
+  --color-accent: oklch(0.58 0.22 355);
+}
+
+/* --------------------------------- Globals -------------------------------- */
+@layer base {
+  html,
+  body {
+    margin: 0;
+    width: 100%;
+    min-height: 100%;
+    background: var(--color-surface);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Hairline brand mark at the very top edge, as on the landing page. */
+  body::before {
+    content: '';
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: var(--color-accent);
+    z-index: 100;
+  }
+
+  ::selection {
+    background: var(--color-accent);
+    color: var(--color-surface);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 3px;
+  }
+
+  /* Tabler icon defaults. Presentation attrs on a <g> inside <defs> do NOT
+     inherit into <use> instances, but inherited CSS properties DO cross the
+     shadow boundary — so we declare them here, on every icon <svg>. */
+  svg:has(use) {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  /* solid variant for brand marks (logo). */
+  svg.icon-fill {
+    fill: currentColor;
+    stroke: none;
+  }
+
+  /* Scrollbars */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-line-hi) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  *::-webkit-scrollbar-thumb {
+    background: var(--color-line-hi);
+    border-radius: 999px;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  select,
+  input,
+  textarea,
+  button {
+    font-family: inherit;
+  }
+}
+
+@layer components {
+  .app-shell {
+    width: min(100%, 88rem);
+    min-height: 100vh;
+    margin-inline: auto;
+    padding-inline: clamp(1rem, 3vw, 2.25rem);
+  }
+
+  .panel-premium {
+    border: 1px solid var(--color-line);
+    border-radius: 1rem;
+    background:
+      linear-gradient(145deg, rgba(0, 0, 0, 0.015), transparent 34%),
+      color-mix(in srgb, var(--color-panel) 92%, transparent);
+    box-shadow:
+      0 24px 70px rgba(0, 0, 0, 0.06),
+      inset 0 1px rgba(255, 255, 255, 0.6);
+    backdrop-filter: blur(18px);
+  }
+
+  .section-label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: var(--color-ink-faint);
+    font-family: var(--font-pixel);
+    font-size: 0.6875rem;
+    line-height: 1rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+
+  .composer-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.65rem;
+    color: var(--color-ink);
+    font-family: var(--font-pixel);
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+  }
+
+  .composer-step {
+    display: inline-grid;
+    min-width: 1.75rem;
+    height: 1.375rem;
+    place-items: center;
+    border: 1px solid color-mix(in srgb, var(--color-accent) 45%, transparent);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--color-accent) 7%, transparent);
+    color: var(--color-accent);
+    font-family: var(--font-pixel);
+    font-size: 0.625rem;
+    line-height: 1;
+    letter-spacing: 0.04em;
+  }
+
+  .key-hint {
+    display: inline-flex;
+    min-width: 1.35rem;
+    height: 1.35rem;
+    flex: none;
+    padding-inline: 0.38rem;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--color-line);
+    border-radius: 0.38rem;
+    background: var(--color-panel-hi);
+    color: var(--color-ink-dim);
+    font-family: var(--font-mono);
+    font-size: 0.625rem;
+    font-weight: 550;
+    line-height: 1;
+    box-shadow: inset 0 -1px rgba(0, 0, 0, 0.06);
+  }
+
+  .key-hint-inverse {
+    border-color: rgba(255, 255, 255, 0.35);
+    background: rgba(255, 255, 255, 0.22);
+    color: rgba(0, 0, 0, 0.75);
+    box-shadow: inset 0 -1px rgba(0, 0, 0, 0.12);
+  }
+
+  .control-surface {
+    min-height: 2.5rem;
+    border: 1px solid var(--color-line);
+    border-radius: 0.625rem;
+    background: color-mix(in srgb, var(--color-surface) 88%, transparent);
+    color: var(--color-ink-dim);
+    transition:
+      border-color 160ms ease,
+      background-color 160ms ease,
+      color 160ms ease,
+      transform 160ms ease;
+  }
+
+  .control-surface:hover {
+    border-color: var(--color-line-hi);
+    background: var(--color-panel-hi);
+    color: var(--color-ink);
+  }
+
+  .prompt-shell {
+    overflow: hidden;
+    border: 1px solid var(--color-line);
+    border-radius: 0.875rem;
+    background:
+      linear-gradient(140deg, rgba(0, 0, 0, 0.014), transparent 45%),
+      rgba(255, 255, 255, 0.6);
+    transition:
+      border-color 160ms ease,
+      box-shadow 160ms ease;
+  }
+
+  .prompt-shell:focus-within {
+    border-color: color-mix(in srgb, var(--color-accent) 55%, transparent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 8%, transparent);
+  }
+
+  .action-primary {
+    min-height: 2.75rem;
+    border-radius: 0.75rem;
+    background: var(--color-accent);
+    color: var(--color-surface);
+    box-shadow: 0 10px 35px -15px var(--color-accent);
+    transition:
+      box-shadow 180ms ease,
+      transform 180ms ease,
+      opacity 180ms ease;
+  }
+
+  .action-primary:hover:not(:disabled) {
+    transform: translateY(-1px);
+    box-shadow: 0 14px 42px -13px var(--color-accent);
+  }
+
+  .action-primary:active:not(:disabled) {
+    transform: translateY(0);
+  }
+
+  .action-primary:disabled,
+  .control-surface:disabled {
+    cursor: not-allowed;
+    opacity: 0.48;
+  }
+
+  .result-toolbar {
+    position: sticky;
+    top: 0.75rem;
+    z-index: 20;
+    background: transparent;
+  }
+
+  .scroll-affordance {
+    position: relative;
+    isolation: isolate;
+  }
+
+  .scroll-affordance::after {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 2.5rem;
+    content: "";
+    pointer-events: none;
+    background: linear-gradient(90deg, transparent, var(--color-panel));
+    opacity: 0.82;
+  }
+
+  .result-card {
+    box-shadow:
+      0 18px 55px rgba(0, 0, 0, 0.07),
+      inset 0 1px rgba(255, 255, 255, 0.6);
+    transition:
+      border-color 180ms ease,
+      transform 180ms ease;
+  }
+
+  .result-card:hover {
+    border-color: var(--color-line-hi);
+  }
+
+  .view-tab[aria-selected="true"],
+  .view-tab[data-on="true"] {
+    background: var(--color-panel-hi);
+    color: var(--color-ink);
+  }
+
+  .arena-select {
+    background-color: color-mix(in srgb, var(--color-surface) 88%, transparent);
+  }
+}
+
+@utility no-scrollbar {
+  scrollbar-width: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+/* Streaming caret */
+@keyframes battle-blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+.caret {
+  display: inline-block;
+  width: 0.5em;
+  height: 1em;
+  margin-left: 1px;
+  transform: translateY(2px);
+  background: var(--color-accent);
+  animation: battle-blink 1s step-end infinite;
+}
+
+/* Spin for loading rings */
+@keyframes battle-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.spin {
+  animation: battle-spin 0.8s linear infinite;
+}
+
+/* Subtle dotted grid background — light version of the landing page texture */
+.grid-bg {
+  background-image:
+    radial-gradient(circle at 52% -12%, color-mix(in srgb, var(--color-accent) 7%, transparent), transparent 30rem),
+    linear-gradient(rgba(0, 0, 0, 0.02) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 0, 0, 0.02) 1px, transparent 1px);
+  background-size: auto, 32px 32px, 32px 32px;
+  background-attachment: fixed;
+}
+
+@media (max-width: 639px) {
+  .result-toolbar {
+    top: 0.5rem;
+  }
+
+  .scroll-affordance::after {
+    width: 1.75rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

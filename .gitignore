@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+bun.lock
+package-lock.json
+ui/package-lock.json
+ui/node_modules/
+
+# Build output — the UI dist is published to npm but never committed.
+ui/dist/
+
+# OS
+.DS_Store
+
+# Runtime sandbox artifacts
+~/.aba-sandbox/
+reports/

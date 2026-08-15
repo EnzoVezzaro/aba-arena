@@ -1,0 +1,27 @@
+{
+  "name": "aba-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "ACC Battle Arena web UI — side-by-side benchmarks (ACC vs no-ACC) with live streaming.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^1.2.0",
+    "@ai-sdk/google": "^1.2.0",
+    "@ai-sdk/openai": "^1.2.0",
+    "@ai-sdk/openai-compatible": "^0.2.0",
+    "@tailwindcss/vite": "^4.3.3",
+    "ai": "^4.1.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "tailwindcss": "^4.3.3"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^6.0.0"
+  }
+}
