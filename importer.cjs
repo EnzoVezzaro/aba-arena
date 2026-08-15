@@ -87,7 +87,14 @@ async function importProject(spec) {
     
     const snapshotInfo = {
       sourceType: type,
-      sourceUrl: type === 'github' ? `https://github.com/${pathOrUrl}` : type === 'git' ? pathOrUrl : undefined,
+      sourceUrl:
+        type === 'github'
+          ? /^https?:\/\//i.test(pathOrUrl)
+            ? pathOrUrl.replace(/\/+$/, '')
+            : `https://github.com/${pathOrUrl}`
+          : type === 'git'
+            ? pathOrUrl
+            : undefined,
       sourcePath: type === 'local' ? pathOrUrl : undefined,
       commitSha,
       snapshotHash,

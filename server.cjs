@@ -130,12 +130,54 @@ function buildBaseContext(snapshotDir, info) {
 }
 
 /**
- * Context for the ACC panel: the base context plus everything the ACC
- * framework contributes — AGENTS.md contracts and the acc CLI's derived
- * context (graph/context output).
+ * ACC onboarding pipeline for the benchmark panel. Mirrors how a real
+ * project adopts ACC, so the benchmark measures the framework honestly:
+ *
+ *   1. clone repo        → done by the importer (snapshotDir)
+ *   2. install acc-cli   → resolveAcc() (npm-installed or npx on demand)
+ *   3. acc init          → scaffold .acc/ + AGENTS.md contracts
+ *   4. acc scan/prepare  → derive the architecture graph + focused context
+ *   5. start challenge   → the assembled context below feeds the battle
+ *
+ * Returns { context, steps } — steps is a list of { step, label, ok, detail }
+ * shown in the UI so the benchmark is transparent about what ACC did.
  */
 async function buildAccContext(snapshotDir, info, baseContext) {
   const parts = [baseContext];
+  const steps = [];
+
+  // Step 3 — acc init: scaffold ACC structure only if it isn't already there
+  // (never rewrites an existing ACC repo — init is additive by contract).
+  const accDir = path.join(snapshotDir, '.acc');
+  const needsInit = !fs.existsSync(path.join(accDir, 'config', 'config.yaml'));
+  if (needsInit) {
+    const init = await runAcc(['init', '.'], snapshotDir);
+    steps.push({
+      step: 3,
+      label: 'acc init',
+      ok: init.code === 0,
+      detail: init.code === 0 ? 'scaffolded .acc/ control plane' : (init.err || init.out || '').trim().slice(0, 200),
+    });
+  } else {
+    steps.push({ step: 3, label: 'acc init', ok: true, detail: 'already initialized (.acc/ present)' });
+  }
+
+  // Step 4 — scan/prepare: derive the architecture graph, then the focused
+  // agent context that ACC contributes to a coding agent.
+  const graph = await runAcc(['graph', '--format', 'text'], snapshotDir);
+  steps.push({
+    step: 4,
+    label: 'acc graph (scan)',
+    ok: graph.code === 0,
+    detail: graph.code === 0 ? 'architecture graph derived' : (graph.err || graph.out || '').trim().slice(0, 200),
+  });
+  const scan = await runAcc(['context', '.', '--depth', '1', '--max-bytes', '16000'], snapshotDir);
+  steps.push({
+    step: 4,
+    label: 'acc context (prepare)',
+    ok: scan.code === 0,
+    detail: scan.code === 0 ? 'focused agent context generated' : (scan.err || scan.out || '').trim().slice(0, 200),
+  });
 
   const agentsFiles = findFiles(snapshotDir, (name) => name.toLowerCase() === 'agents.md')
     .filter((f) => !f.includes(`${path.sep}.acc${path.sep}`))
@@ -149,19 +191,27 @@ async function buildAccContext(snapshotDir, info, baseContext) {
     }
   }
 
-  const acc = await runAcc(['context', '.', '--depth', '1', '--max-bytes', '16000'], snapshotDir);
-  if (acc && acc.out.trim()) {
-    parts.push('## ACC derived context (acc context --depth 1)');
-    parts.push('```\n' + truncate(acc.out, 16000) + '\n```');
+  if (graph && graph.out.trim()) {
+    parts.push('## ACC architecture graph (acc graph)');
+    parts.push('```\n' + truncate(graph.out, 8000) + '\n```');
   }
 
-  return truncate(parts.join('\n\n'), MAX_CONTEXT_BYTES);
+  if (scan && scan.out.trim()) {
+    parts.push('## ACC derived context (acc context --depth 1)');
+    parts.push('```\n' + truncate(scan.out, 16000) + '\n```');
+  }
+
+  return { context: truncate(parts.join('\n\n'), MAX_CONTEXT_BYTES), steps };
 }
 
 /** Run the acc CLI in a directory; returns { code, out, err }. */
 function runAcc(args, cwd) {
   const acc = resolveAcc();
-  const child = spawn(process.execPath, [...acc.args, ...args], {
+  // npm-installed / local dev copy → node <script>; npx on demand → npx directly.
+  const isNpx = acc.args[0] === 'npx';
+  const cmd = isNpx ? acc.args[0] : process.execPath;
+  const cmdArgs = isNpx ? [...acc.args.slice(1), ...args] : [...acc.args, ...args];
+  const child = spawn(cmd, cmdArgs, {
     cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...process.env, NO_COLOR: '1' },
@@ -290,7 +340,7 @@ async function handleApi(req, res, url) {
       const info = importResult.snapshotInfo;
 
       const baseContext = buildBaseContext(workDir, info);
-      const accContext = await buildAccContext(workDir, info, baseContext);
+      const accResult = await buildAccContext(workDir, info, baseContext);
 
       currentRepo = {
         name: info.sourceType === 'github' ? (source.split('/').pop() || 'repo') : path.basename(workDir),
@@ -298,12 +348,13 @@ async function handleApi(req, res, url) {
         sha: info.commitSha,
         workDir,
         baseContext,
-        accContext,
+        accContext: accResult.context,
       };
       sendJson(res, 200, {
         repo: { name: currentRepo.name, source, sha: info.commitSha },
         baseContext,
-        accContext,
+        accContext: accResult.context,
+        accPipeline: accResult.steps,
       });
       return;
     } catch (err) {
