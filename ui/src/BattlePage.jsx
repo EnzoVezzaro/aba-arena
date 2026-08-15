@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { streamText } from 'ai';
+import { streamText, tool } from 'ai';
+import { z } from 'zod';
 import { getProvider, loadKeys, estimateCost } from './providers.js';
 import { checkSuccess } from './tasks.js';
 import {
@@ -10,9 +11,10 @@ import {
   computeWinners,
 } from './arena.js';
 import { Icon, ResultCard, PENDING_BATTLE_KEY } from './components.jsx';
-import { saveReport } from './api.js';
+import { saveReport, sandboxTree, sandboxRead, sandboxWrite } from './api.js';
 import Timeline from './Timeline.jsx';
 import IconSprite from './icons.jsx';
+import CodeExplorer from './CodeExplorer.jsx';
 
 const systemPrompt = (battle) =>
   battle?.systemPrompt ||
@@ -45,6 +47,7 @@ export default function BattlePage({ onBack }) {
   const [viewMode, setViewMode] = useState('answer');
   const [blind, setBlind] = useState({ enabled: false, order: null, revealed: true });
   const [savedReport, setSavedReport] = useState('');
+  const [explorerPanel, setExplorerPanel] = useState(null); // null | panel object
 
   const abortRef = useRef(new Set());
   const resultsRef = useRef(results);
@@ -56,6 +59,80 @@ export default function BattlePage({ onBack }) {
   const panels = battle?.panels || [];
   const tasks = battle?.tasks || [];
   const repo = battle?.repo || null;
+
+  /* ------------------------- agent tools -------------------------------- */
+  // Each panel's agent works inside its own isolated sandbox copy of the
+  // repo. Tools read/write files through the backend — the two sides can
+  // never touch each other's files or the original repository.
+  function agentTools(panelId) {
+    return {
+      list_files: tool({
+        description:
+          'List the files and folders in the repository sandbox. Use this to explore the codebase before editing. Returns a tree of paths.',
+        parameters: z.object({ path: z.string().optional().describe('subdirectory to list, relative to repo root (e.g. src)') }),
+        execute: async ({ path: sub = '' }) => {
+          try {
+            const t = await sandboxTree(panelId);
+            const pick = (nodes, prefix) => {
+              for (const n of nodes) {
+                if (n.type === 'dir') {
+                  const full = n.path;
+                  if (sub === '' || sub === '/' || full === sub || full.startsWith(sub + '/')) {
+                    const child = pick(n.children || [], sub);
+                    if (child) return child;
+                  }
+                } else if (sub === '' || n.path === sub) {
+                  return n;
+                }
+              }
+              return sub ? { path: sub, type: 'missing' } : nodes;
+            };
+            const found = pick(t.tree || [], sub);
+            const flat = (nodes, out = []) => {
+              for (const n of nodes) {
+                out.push(`${n.type === 'dir' ? '[d]' : '[f]'} ${n.path}${n.type === 'file' && n.size != null ? ' (' + n.size + 'b)' : ''}`);
+                if (n.children) flat(n.children, out);
+              }
+              return out;
+            };
+            const lines = flat(Array.isArray(found) ? found : [found]);
+            return lines.length ? lines.join('\n') : `no files at ${sub || '/'}`;
+          } catch (e) {
+            return `error listing files: ${e.message}`;
+          }
+        },
+      }),
+      read_file: tool({
+        description:
+          'Read the full contents of a file from the repository sandbox. Use this before editing so you see the real code.',
+        parameters: z.object({ path: z.string().describe('path to the file, relative to repo root (e.g. src/index.js)') }),
+        execute: async ({ path: filePath }) => {
+          try {
+            const r = await sandboxRead(panelId, filePath);
+            return `--- ${r.path} ---\n${r.content}`;
+          } catch (e) {
+            return `error reading ${filePath}: ${e.message}`;
+          }
+        },
+      }),
+      write_file: tool({
+        description:
+          'Write a file in the repository sandbox (creates or overwrites). Use this to make the code changes the task requires.',
+        parameters: z.object({
+          path: z.string().describe('path to the file, relative to repo root (e.g. src/index.js)'),
+          content: z.string().describe('the complete new file content'),
+        }),
+        execute: async ({ path: filePath, content }) => {
+          try {
+            await sandboxWrite(panelId, filePath, content);
+            return `wrote ${filePath} (${content.length} bytes)`;
+          } catch (e) {
+            return `error writing ${filePath}: ${e.message}`;
+          }
+        },
+      }),
+    };
+  }
 
   /* ------------------------- battle runner ------------------------------- */
 
@@ -75,11 +152,15 @@ export default function BattlePage({ onBack }) {
     const model = provider.create(key);
     // AI SDK v4: streamText() returns a result object (textStream iterable +
     // usage promise) — it is NOT a promise, so consume it directly.
+    // The agent gets tools to explore and EDIT its own isolated sandbox copy
+    // of the repo (maxSteps lets it iterate: read → change → verify).
     const result = streamText({
       model: model(panel.model),
       system: systemPrompt(battleRef.current),
-      prompt: `${context}\n\nTASK:\n${task.prompt}`,
+      prompt: `${context}\n\nTASK:\n${task.prompt}\n\nYou are working inside an isolated copy of the repository. Use the provided tools (list_files, read_file, write_file) to explore the real code and make the changes the task asks for. When you write code, ALSO explain in your final answer what you changed and why.`,
       temperature: 0.3,
+      tools: agentTools(panel.id),
+      maxSteps: 12,
       abortSignal: controller.signal,
     });
     const { textStream, usage } = result;
@@ -308,20 +389,38 @@ export default function BattlePage({ onBack }) {
               </p>
             </div>
           </div>
-          <span
-            className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[10px] uppercase tracking-[0.14em] ${
-              battleStatus === 'running'
-                ? 'border-[var(--color-accent)]/40 bg-[var(--color-accent)]/10 text-[var(--color-accent)]'
-                : battleStatus === 'done'
-                  ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-400'
-                  : 'border-[var(--color-line)] text-[var(--color-ink-faint)]'
-            }`}
-            role="status"
-            aria-live="polite"
-          >
-            <span className={`size-1.5 rounded-full ${battleStatus === 'running' ? 'animate-pulse bg-[var(--color-accent)]' : battleStatus === 'done' ? 'bg-emerald-400' : 'bg-[var(--color-ink-faint)]'}`} />
-            {battleStatus === 'running' ? 'running…' : battleStatus === 'done' ? 'complete' : 'ready'}
-          </span>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setExplorerPanel(panels.find((p) => p.acc) || panels[0])}
+              className="control-surface flex min-h-9 items-center gap-2 px-3 text-[11px]"
+              title="Browse the ACC panel's sandbox files"
+            >
+              <Icon name="code" className="size-4 text-[var(--color-accent)]" />
+              <span className="hidden sm:inline">ACC files</span>
+            </button>
+            <button
+              onClick={() => setExplorerPanel(panels.find((p) => !p.acc) || panels[1])}
+              className="control-surface flex min-h-9 items-center gap-2 px-3 text-[11px]"
+              title="Browse the no-ACC panel's sandbox files"
+            >
+              <Icon name="folder" className="size-4" />
+              <span className="hidden sm:inline">plain files</span>
+            </button>
+            <span
+              className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[10px] uppercase tracking-[0.14em] ${
+                battleStatus === 'running'
+                  ? 'border-[var(--color-accent)]/40 bg-[var(--color-accent)]/10 text-[var(--color-accent)]'
+                  : battleStatus === 'done'
+                    ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-400'
+                    : 'border-[var(--color-line)] text-[var(--color-ink-faint)]'
+              }`}
+              role="status"
+              aria-live="polite"
+            >
+              <span className={`size-1.5 rounded-full ${battleStatus === 'running' ? 'animate-pulse bg-[var(--color-accent)]' : battleStatus === 'done' ? 'bg-emerald-400' : 'bg-[var(--color-ink-faint)]'}`} />
+              {battleStatus === 'running' ? 'running…' : battleStatus === 'done' ? 'complete' : 'ready'}
+            </span>
+          </div>
         </header>
 
         <main className="flex-1 pb-8">
@@ -594,6 +693,14 @@ export default function BattlePage({ onBack }) {
           </div>
         </footer>
       </div>
+
+      {/* ======================== CODE EXPLORER ======================== */}
+      <CodeExplorer
+        open={!!explorerPanel}
+        panel={explorerPanel}
+        repoName={repo?.name || ''}
+        onClose={() => setExplorerPanel(null)}
+      />
     </div>
   );
 }

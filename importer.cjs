@@ -194,4 +194,5 @@ module.exports = {
   cloneGithubRepo,
   cloneGitRepo,
   getCommitSha,
+  copyDirectory,
 };

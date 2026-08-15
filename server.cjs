@@ -107,6 +107,47 @@ function buildTree(root) {
   return shown.join('\n');
 }
 
+const SKIP_SANDBOX_DIRS = new Set(['.git', 'node_modules', '.acc', 'dist', 'build', 'coverage']);
+
+/** Recursive file tree for the sandbox explorer: [{ path, type, size, children }]. */
+function buildSandboxTree(root, target) {
+  const entries = [];
+  let list = [];
+  try {
+    list = fs.readdirSync(target, { withFileTypes: true });
+  } catch (err) {
+    throw new Error(`cannot list ${path.relative(root, target) || '/'}: ${err.message}`);
+  }
+  list
+    .filter((e) => !SKIP_SANDBOX_DIRS.has(e.name))
+    .sort((a, b) => {
+      if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    })
+    .forEach((e) => {
+      const abs = path.join(target, e.name);
+      const rel = path.relative(root, abs).split(path.sep).join('/');
+      if (e.isDirectory()) {
+        let children = [];
+        try {
+          children = buildSandboxTree(root, abs);
+        } catch {
+          children = [];
+        }
+        entries.push({ path: rel, type: 'dir', children });
+      } else {
+        let size = 0;
+        try {
+          size = fs.statSync(abs).size;
+        } catch {
+          size = 0;
+        }
+        entries.push({ path: rel, type: 'file', size });
+      }
+    });
+  return entries;
+}
+
 function truncate(s, max = MAX_CONTEXT_BYTES) {
   if (!s) return '';
   return s.length > max ? s.slice(0, max) + '\n… (truncated)' : s;
@@ -329,7 +370,7 @@ async function handleApi(req, res, url) {
         sendJson(res, 400, { error: 'source is required (local path or GitHub URL)' });
         return;
       }
-      const { importProject } = require('./importer.cjs');
+      const { importProject, copyDirectory } = require('./importer.cjs');
       const importResult = await importProject({
         type: /^https?:\/\//i.test(source) ? (source.includes('github.com') ? 'github' : 'git') : 'local',
         pathOrUrl: source,
@@ -339,14 +380,29 @@ async function handleApi(req, res, url) {
       const workDir = importResult.snapshotDir || importResult.originalDir;
       const info = importResult.snapshotInfo;
 
-      const baseContext = buildBaseContext(workDir, info);
-      const accResult = await buildAccContext(workDir, info, baseContext);
+      // Two ISOLATED sandboxes — one per panel. Each gets its own copy of the
+      // repo so the agents can edit files without affecting the other side or
+      // the original repository.
+      const battleId = `b${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+      const sandboxRoot = path.join(SANDBOX_DIR, 'battles', battleId);
+      const accDir = path.join(sandboxRoot, 'acc');
+      const plainDir = path.join(sandboxRoot, 'plain');
+      fs.mkdirSync(accDir, { recursive: true });
+      fs.mkdirSync(plainDir, { recursive: true });
+      copyDirectory(workDir, accDir);
+      copyDirectory(workDir, plainDir);
+
+      // ACC onboarding pipeline runs on the ACC sandbox only — the plain
+      // sandbox stays untouched so the benchmark compares framework vs no.
+      const baseContext = buildBaseContext(plainDir, info);
+      const accResult = await buildAccContext(accDir, info, baseContext);
 
       currentRepo = {
         name: info.sourceType === 'github' ? (source.split('/').pop() || 'repo') : path.basename(workDir),
         source,
         sha: info.commitSha,
         workDir,
+        sandboxes: { acc: accDir, plain: plainDir },
         baseContext,
         accContext: accResult.context,
       };
@@ -359,6 +415,66 @@ async function handleApi(req, res, url) {
       return;
     } catch (err) {
       sendJson(res, 400, { error: err.message });
+      return;
+    }
+  }
+
+  // Sandbox file API — each panel's agent can read/write files inside its
+  // own isolated sandbox copy of the repo. Paths are confined to the
+  // sandbox root (no escaping via ../, no .git/node_modules).
+  const sandboxMatch = url.pathname.match(/^\/api\/sandbox\/(acc|plain)\/(tree|file)$/);
+  if (sandboxMatch) {
+    const panel = sandboxMatch[1];
+    const action = sandboxMatch[2];
+    const sandboxDir = currentRepo && currentRepo.sandboxes && currentRepo.sandboxes[panel];
+    if (!sandboxDir || !fs.existsSync(sandboxDir)) {
+      sendJson(res, 400, { error: 'no repo loaded — load a repository first' });
+      return;
+    }
+    const rel = (url.searchParams.get('path') || '').replace(/^\/+/, '');
+    const target = path.resolve(sandboxDir, rel);
+    // Confine to the sandbox root; skip VCS, deps, and ACC control dirs in trees.
+    if (target !== sandboxDir && !target.startsWith(sandboxDir + path.sep)) {
+      sendJson(res, 403, { error: 'path escapes the sandbox' });
+      return;
+    }
+
+    if (action === 'tree') {
+      try {
+        sendJson(res, 200, { panel, tree: buildSandboxTree(sandboxDir, target) });
+      } catch (err) {
+        sendJson(res, 400, { error: err.message });
+      }
+      return;
+    }
+
+    if (action === 'file') {
+      if (method === 'GET') {
+        try {
+          const content = fs.readFileSync(target, 'utf8');
+          sendJson(res, 200, { panel, path: rel || '/', content });
+        } catch (err) {
+          sendJson(res, 404, { error: `cannot read ${rel || '/'}: ${err.message}` });
+        }
+        return;
+      }
+      if (method === 'POST') {
+        try {
+          const body = await readBody(req);
+          const content = typeof body.content === 'string' ? body.content : '';
+          if (rel && !/\/\/\.\.|(\.\.\/)/.test(rel)) {
+            fs.mkdirSync(path.dirname(target), { recursive: true });
+            fs.writeFileSync(target, content, 'utf8');
+            sendJson(res, 200, { panel, path: rel, ok: true });
+          } else {
+            sendJson(res, 403, { error: 'invalid path' });
+          }
+        } catch (err) {
+          sendJson(res, 400, { error: `cannot write ${rel}: ${err.message}` });
+        }
+        return;
+      }
+      sendJson(res, 405, { error: 'method not allowed' });
       return;
     }
   }
