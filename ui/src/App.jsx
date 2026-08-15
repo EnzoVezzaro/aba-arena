@@ -156,6 +156,8 @@ export default function App() {
       return;
     }
     // Snapshot the battle config so /battle can run it with realtime streaming.
+    // RegExp hints don't survive JSON.stringify — store them as strings and
+    // checkSuccess() rebuilds them on load.
     localStorage.setItem(
       PENDING_BATTLE_KEY,
       JSON.stringify({
@@ -169,7 +171,10 @@ export default function App() {
           accPipeline: repo.accPipeline || [],
         },
         panels,
-        tasks,
+        tasks: tasks.map((t) => ({
+          ...t,
+          hints: (t.hints || []).map((h) => (h instanceof RegExp ? h.source : h)),
+        })),
         systemPrompt,
       })
     );

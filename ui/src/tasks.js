@@ -41,7 +41,19 @@ export function checkSuccess(output, task) {
   const text = output || '';
   if (text.trim().length < (task.minChars || 100)) return false;
   if (task.hints && task.hints.length > 0) {
-    return task.hints.some((re) => re.test(text));
+    return task.hints.some((hint) => {
+      // Hints survive localStorage round-trips as strings ({...} when a
+      // RegExp gets JSON.stringify'd) — rebuild or treat as a substring.
+      if (hint instanceof RegExp) return hint.test(text);
+      if (typeof hint === 'string') {
+        try {
+          return new RegExp(hint, 'i').test(text);
+        } catch {
+          return text.toLowerCase().includes(hint.toLowerCase());
+        }
+      }
+      return false;
+    });
   }
   return true;
 }
