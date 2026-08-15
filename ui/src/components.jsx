@@ -6,9 +6,9 @@ import {
   fmtCost,
   fmtRate,
   estTokens,
-  extractCode,
   extractAnswer,
 } from './arena.js';
+import CodeSandbox from './CodeSandbox.jsx';
 
 /* ------------------------------------------------------------------------ */
 /* Shared constants + localStorage helpers                                   */
@@ -157,7 +157,6 @@ export function ResultCard({ panel, result, context, viewMode, onViewMode, blind
   const provider = getProvider(panel.provider);
   const name = blind ? alias : `${provider.label} · ${panel.model}`;
   const state = result?.status || 'pending';
-  const code = result?.output ? extractCode(result.output) : '';
   const answer = result?.output ? extractAnswer(result.output) : '';
   const elapsed = state === 'running' ? Date.now() - (result._startedAt || Date.now()) : result?.timeMs || 0;
 
@@ -223,16 +222,44 @@ export function ResultCard({ panel, result, context, viewMode, onViewMode, blind
           </div>
         )}
         {state === 'running' && (
-          <div className="h-full overflow-auto p-3.5 text-[12px] leading-relaxed text-[var(--color-ink-dim)]">
-            <div className="flex items-center gap-1.5 pb-2 text-[10px] uppercase tracking-[0.18em] text-[var(--color-ink-faint)]">
-              <Icon name="brain" className="size-3.5 animate-pulse text-[var(--color-accent)]" />
-              <span>thinking…</span>
+          <>
+            <div className="flex items-center gap-1 border-b border-[var(--color-line)] px-3 py-1.5">
+              <button
+                data-on={viewMode === 'answer'}
+                className="view-tab flex min-h-8 items-center gap-1.5 rounded-lg px-2.5 text-[11px] text-[var(--color-ink-dim)] transition-colors"
+                onClick={() => onViewMode('answer')}
+                aria-selected={viewMode === 'answer'}
+              >
+                <Icon name="text" className="size-4" />
+                <span>Answer</span>
+              </button>
+              <button
+                data-on={viewMode === 'code'}
+                className="view-tab flex min-h-8 items-center gap-1.5 rounded-lg px-2.5 text-[11px] text-[var(--color-ink-dim)] transition-colors"
+                onClick={() => onViewMode('code')}
+                aria-selected={viewMode === 'code'}
+              >
+                <Icon name="code" className="size-4" />
+                <span>Code</span>
+              </button>
             </div>
-            <div className="whitespace-pre-wrap break-words">
-              <span>{result?.output || ''}</span>
-              <span className="caret" />
+            <div className="h-[calc(100%-2.5rem)]">
+              {viewMode === 'code' ? (
+                <CodeSandbox panel={panel} />
+              ) : (
+                <div className="h-full overflow-auto p-3.5 text-[12px] leading-relaxed text-[var(--color-ink-dim)]">
+                  <div className="flex items-center gap-1.5 pb-2 text-[10px] uppercase tracking-[0.18em] text-[var(--color-ink-faint)]">
+                    <Icon name="brain" className="size-3.5 animate-pulse text-[var(--color-accent)]" />
+                    <span>thinking…</span>
+                  </div>
+                  <div className="whitespace-pre-wrap break-words">
+                    <span>{result?.output || ''}</span>
+                    <span className="caret" />
+                  </div>
+                </div>
+              )}
             </div>
-          </div>
+          </>
         )}
         {state === 'done' && (
           <>
@@ -247,21 +274,24 @@ export function ResultCard({ panel, result, context, viewMode, onViewMode, blind
                 <span>Answer</span>
               </button>
               <button
-                data-on={viewMode === 'code' && !!code}
-                className={`view-tab flex min-h-8 items-center gap-1.5 rounded-lg px-2.5 text-[11px] text-[var(--color-ink-dim)] transition-colors ${code ? '' : 'cursor-not-allowed opacity-40'}`}
-                onClick={() => code && onViewMode('code')}
-                aria-selected={viewMode === 'code' && !!code}
-                disabled={!code}
+                data-on={viewMode === 'code'}
+                className={`view-tab flex min-h-8 items-center gap-1.5 rounded-lg px-2.5 text-[11px] text-[var(--color-ink-dim)] transition-colors`}
+                onClick={() => onViewMode('code')}
+                aria-selected={viewMode === 'code'}
               >
                 <Icon name="code" className="size-4" />
-                <span>Code{code ? ` (${code.split('\n').length})` : ''}</span>
+                <span>Code</span>
               </button>
             </div>
-            <div className="h-[calc(100%-2.5rem)] overflow-auto p-3.5 text-[12px] leading-relaxed text-[var(--color-ink-dim)]">
-              {viewMode === 'code' && code ? (
-                <pre className="whitespace-pre-wrap break-words font-mono text-[11px] text-[var(--color-ink)]">{code}</pre>
+            <div className="h-[calc(100%-2.5rem)]">
+              {viewMode === 'code' ? (
+                // Code view = the panel's sandbox: real repository files
+                // (including the agent's edits), browsable live.
+                <CodeSandbox panel={panel} />
               ) : (
-                <div className="whitespace-pre-wrap break-words">{answer || result.output}</div>
+                <div className="h-full overflow-auto p-3.5 text-[12px] leading-relaxed text-[var(--color-ink-dim)]">
+                  <div className="whitespace-pre-wrap break-words">{answer || result.output}</div>
+                </div>
               )}
             </div>
           </>
@@ -311,12 +341,6 @@ export function PanelConfig({ panel, onPanel, liveModels, modelsLoading }) {
         >
           {panel.acc ? 'ACC' : 'no-ACC'}
         </span>
-        {panel.acc && (
-          <span className="inline-flex items-center gap-1 rounded-md bg-[var(--color-accent)] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.14em] text-black">
-            <Icon name="sparkles" className="size-3" />
-            framework
-          </span>
-        )}
         <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--color-ink-dim)]">{panel.label}</span>
         <span className={`size-1.5 shrink-0 rounded-full ${configured ? 'bg-emerald-400' : 'bg-[var(--color-ink-faint)]'}`} title={configured ? 'configured' : 'no API key set'} />
       </div>
