@@ -109,12 +109,13 @@ export function MetricPills({ result, best }) {
   const gen = result.genMs != null ? result.genMs : result.durationMs;
   const tput = gen > 0 ? (result.outputTokens || 0) / (gen / 1000) : 0;
   const live = result.status === 'running';
+  const totalMs = result.timeMs != null ? result.timeMs : result.durationMs;
   const pills = [
-    { icon: 'i-bolt', key: 'fast', label: 'total time — request to finish', value: fmtDur(result.timeMs || result.durationMs || 0), best: isBest('fast') },
+    { icon: 'i-bolt', key: 'fast', label: 'total time — request to finish', value: totalMs != null ? fmtDur(totalMs) : live ? '…' : '—', best: isBest('fast') },
     { icon: 'i-clock', key: 'ttft', label: 'time to first token', value: result.ttftMs != null ? fmtDur(result.ttftMs) : live ? '…' : '—', best: isBest('ttft') },
-    { icon: 'i-clock-bolt', key: 'gen', label: 'generation time — first to last token', value: live ? '—' : fmtDur(gen), best: isBest('gen') },
-    { icon: 'i-down', key: 'in', label: 'input tokens', value: result.inputTokens != null ? `${fmtInt(result.inputTokens)}${live ? ' est.' : ''}` : live ? fmtInt(estTokens(result.output)) : '·', best: false },
-    { icon: 'i-up', key: 'out', label: 'output tokens', value: result.outputTokens != null ? `${fmtInt(result.outputTokens)}${live ? ' est.' : ''}` : live ? fmtInt(estTokens(result.output)) : '·', best: false },
+    { icon: 'i-clock-bolt', key: 'gen', label: 'generation time — first to last token', value: live ? '—' : gen != null ? fmtDur(gen) : '—', best: isBest('gen') },
+    { icon: 'i-down', key: 'in', label: 'input tokens', value: result.inputTokens != null ? `${fmtInt(result.inputTokens)}${live ? ' est.' : ''}` : live ? fmtInt(estTokens(result.output)) : '—', best: false },
+    { icon: 'i-up', key: 'out', label: 'output tokens', value: result.outputTokens != null ? `${fmtInt(result.outputTokens)}${live ? ' est.' : ''}` : live ? fmtInt(estTokens(result.output)) : '—', best: false },
     { icon: 'i-gauge', key: 'tput', label: 'throughput — output tokens/sec', value: tput > 0 ? `${fmtRate(tput)} t/s` : '—', best: isBest('tput') },
     { icon: 'i-coin', key: 'cheap', label: 'cost (estimate)', value: result.cost != null ? `${fmtCost(result.cost)} est.` : '—', best: isBest('cheap') },
   ];

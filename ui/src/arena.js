@@ -4,10 +4,10 @@
  * per-metric winner logic that makes side-by-side battles readable.
  */
 
-export const fmtInt = (n) => n.toLocaleString('en-US');
+export const fmtInt = (n) => (n == null || Number.isNaN(n) ? '—' : n.toLocaleString('en-US'));
 
 export const fmtDur = (ms) =>
-  ms >= 1000 ? `${(ms / 1000).toFixed(2)}s` : `${Math.round(ms)}ms`;
+  ms == null || Number.isNaN(ms) ? '—' : ms >= 1000 ? `${(ms / 1000).toFixed(2)}s` : `${Math.round(ms)}ms`;
 
 export const fmtCost = (v) => {
   if (v == null || Number.isNaN(v)) return '—';
@@ -66,17 +66,41 @@ export function downsample(samples, maxPoints = 60) {
 /**
  * Compute per-metric winners across the completed panels of one task.
  * Returns a map: panelId → { fast, ttft, gen, cheap, tput }.
+ *
+ * A panel wins a metric only when its value is STRICTLY better than every
+ * other panel's — ties award nobody. Panels without a value for a metric
+ * never win it.
  */
 export function computeWinners(donePanels) {
   const best = new Map();
   if (donePanels.length < 2) return best;
-  const fast = donePanels.reduce((a, c) => (c.durationMs < a.durationMs ? c : a));
-  const knownCosts = donePanels.filter((r) => r.costKnown !== false);
-  const cheap = knownCosts.length ? knownCosts.reduce((a, c) => (c.cost < a.cost ? c : a)) : null;
-  const ttft = donePanels.reduce((a, c) => ((c.ttftMs || Infinity) < (a.ttftMs || Infinity) ? c : a));
-  const gen = donePanels.reduce((a, c) => ((c.genMs || Infinity) < (a.genMs || Infinity) ? c : a));
-  const rate = (r) => r.completionTokens / (r.genMs || r.durationMs || 1);
-  const tput = donePanels.reduce((a, c) => (rate(c) > rate(a) ? c : a));
+
+  const durationOf = (r) => r.timeMs ?? r.durationMs;
+  const known = (fn) =>
+    donePanels
+      .map((r) => ({ r, v: fn(r) }))
+      .filter((x) => x.v != null && Number.isFinite(x.v));
+  // Winner: the unique panel holding the extreme value. If two panels share
+  // the extreme value (a tie), nobody wins that metric.
+  const uniqueBest = (fn, lowerIsBetter) => {
+    const rows = known(fn);
+    if (rows.length < 2) return null;
+    const bestVal = lowerIsBetter
+      ? Math.min(...rows.map((x) => x.v))
+      : Math.max(...rows.map((x) => x.v));
+    const ties = rows.filter((x) => x.v === bestVal);
+    if (ties.length !== 1) return null;
+    return ties[0].r;
+  };
+
+  const fast = uniqueBest(durationOf, true);
+  const ttft = uniqueBest((r) => r.ttftMs, true);
+  const gen = uniqueBest((r) => r.genMs, true);
+  const cheap = uniqueBest((r) => r.cost, true);
+  const rate = (r) =>
+    r.genMs || r.durationMs ? (r.outputTokens || 0) / ((r.genMs || r.durationMs) / 1000) : 0;
+  const tput = uniqueBest((r) => (r.outputTokens ? rate(r) : null), false);
+
   for (const v of donePanels) {
     best.set(v.id, {
       fast: v === fast,

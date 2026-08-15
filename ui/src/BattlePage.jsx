@@ -182,15 +182,23 @@ export default function BattlePage({ onBack }) {
     const doneAt = Date.now();
     const elapsed = doneAt - startedAt;
     const success = checkSuccess(output, task);
+    // Keep missing usage as null (not 0) so the UI shows '—' instead of
+    // fake '0 tokens' / '$0' values when the provider reports nothing.
+    const inputTokens = u?.inputTokens != null ? u.inputTokens : null;
+    const outputTokens = u?.outputTokens != null ? u.outputTokens : null;
+    const cost =
+      inputTokens != null || outputTokens != null
+        ? estimateCost(panel.model, inputTokens ?? 0, outputTokens ?? 0)
+        : null;
     return {
       status: 'done',
       output,
       timeMs: elapsed,
       ttftMs: firstTokenAt ? firstTokenAt - startedAt : elapsed,
       genMs: firstTokenAt ? doneAt - firstTokenAt : 0,
-      inputTokens: u?.inputTokens ?? 0,
-      outputTokens: u?.outputTokens ?? 0,
-      cost: estimateCost(panel.model, u?.inputTokens ?? 0, u?.outputTokens ?? 0),
+      inputTokens,
+      outputTokens,
+      cost,
       success,
       samples,
     };
@@ -296,18 +304,24 @@ export default function BattlePage({ onBack }) {
     if (done.length === 0) return null;
     const acc = done.map((r) => r.panels.acc);
     const plain = done.map((r) => r.panels.plain);
-    const avg = (arr, f) => (arr.length ? arr.reduce((s, r) => s + f(r), 0) / arr.length : 0);
+    const avg = (arr, f) => {
+      const vals = arr.map(f).filter((v) => v != null && Number.isFinite(v));
+      return vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : null;
+    };
     const accWins = done.filter((r) => {
       const a = r.panels.acc;
       const p = r.panels.plain;
       if (a.success !== p.success) return a.success;
-      return a.timeMs < p.timeMs;
+      return (a.timeMs ?? Infinity) < (p.timeMs ?? Infinity);
     }).length;
     return {
       accWins,
       total: done.length,
       time: { acc: avg(acc, (r) => r.timeMs), plain: avg(plain, (r) => r.timeMs) },
-      tokens: { acc: avg(acc, (r) => r.inputTokens + r.outputTokens), plain: avg(plain, (r) => r.inputTokens + r.outputTokens) },
+      tokens: {
+        acc: avg(acc, (r) => (r.inputTokens != null || r.outputTokens != null ? (r.inputTokens ?? 0) + (r.outputTokens ?? 0) : null)),
+        plain: avg(plain, (r) => (r.inputTokens != null || r.outputTokens != null ? (r.inputTokens ?? 0) + (r.outputTokens ?? 0) : null)),
+      },
       cost: { acc: avg(acc, (r) => r.cost), plain: avg(plain, (r) => r.cost) },
       success: { acc: acc.filter((r) => r.success).length, plain: plain.filter((r) => r.success).length },
     };
