@@ -32,6 +32,7 @@ export default function App() {
   const [repo, setRepo] = useState(null);
   const [repoError, setRepoError] = useState('');
   const [loadingRepo, setLoadingRepo] = useState(false);
+  const [loadElapsed, setLoadElapsed] = useState(0); // seconds while loading
   const [backend, setBackend] = useState(null);
 
   const [panels, setPanels] = useState(INITIAL_PANELS);
@@ -111,7 +112,10 @@ export default function App() {
     const source = repoInput.trim();
     if (!source) return;
     setLoadingRepo(true);
+    setLoadElapsed(0);
     setRepoError('');
+    const t0 = Date.now();
+    const timer = setInterval(() => setLoadElapsed(Math.round((Date.now() - t0) / 1000)), 1000);
     try {
       const data = await loadRepo(source);
       setRepo({
@@ -123,6 +127,7 @@ export default function App() {
     } catch (err) {
       setRepoError(err.message);
     } finally {
+      clearInterval(timer);
       setLoadingRepo(false);
     }
   }
@@ -342,7 +347,7 @@ export default function App() {
                     disabled={loadingRepo}
                     className="absolute right-2 top-1/2 -translate-y-1/2 rounded-lg bg-[var(--color-panel-hi)] px-2.5 py-1.5 text-[11px] font-medium text-[var(--color-ink-dim)] transition-colors hover:bg-[var(--color-line-hi)] hover:text-[var(--color-ink)] disabled:opacity-50"
                   >
-                    {loadingRepo ? 'loading…' : 'Load'}
+                    {loadingRepo ? `loading… ${loadElapsed}s` : 'Load'}
                   </button>
                 </div>
                 {repo && (

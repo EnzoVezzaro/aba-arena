@@ -1,6 +1,6 @@
 {
   "name": "acc-battle-arena",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "ACC Battle Arena (ABA) — side-by-side agent benchmarks (ACC vs no-ACC) with a live Vite web app. Standalone benchmark application, not part of the ACC framework.",
   "license": "MIT",
   "main": "index.cjs",

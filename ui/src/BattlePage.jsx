@@ -11,10 +11,14 @@ import {
   computeWinners,
 } from './arena.js';
 import { Icon, ResultCard, PENDING_BATTLE_KEY } from './components.jsx';
-import { saveReport, sandboxTree, sandboxRead, sandboxWrite } from './api.js';
+import { loadRepo, saveReport, sandboxTree, sandboxRead, sandboxWrite } from './api.js';
 import Timeline from './Timeline.jsx';
 import IconSprite from './icons.jsx';
 import CodeExplorer from './CodeExplorer.jsx';
+
+// Hard cap per panel — provider blocks (rate limits, quota) must not hang the
+// battle forever. The panel is aborted and reported as failed, results show.
+const PANEL_TIMEOUT_MS = 120000;
 
 const systemPrompt = (battle) =>
   battle?.systemPrompt ||
@@ -41,7 +45,7 @@ function shuffle(items) {
 }
 
 export default function BattlePage({ onBack }) {
-  const [battle] = useState(loadPendingBattle);
+  const [battle, setBattle] = useState(loadPendingBattle);
   const [results, setResults] = useState([]);
   const [battleStatus, setBattleStatus] = useState('idle'); // idle | running | done | stopped
   const [viewMode, setViewMode] = useState('answer');
@@ -152,59 +156,70 @@ export default function BattlePage({ onBack }) {
     const samples = [];
     let lastSampleAt = 0;
 
-    const model = provider.create(key);
-    // AI SDK v4: streamText() returns a result object (textStream iterable +
-    // usage promise) — it is NOT a promise, so consume it directly.
-    // The agent gets tools to explore and EDIT its own isolated sandbox copy
-    // of the repo (maxSteps lets it iterate: read → change → verify).
-    const result = streamText({
-      model: model(panel.model),
-      system: systemPrompt(battleRef.current),
-      prompt: `${context}\n\nTASK:\n${task.prompt}\n\nYou are working inside an isolated copy of the repository. Use the provided tools (list_files, read_file, write_file) to explore the real code and make the changes the task asks for. When you write code, ALSO explain in your final answer what you changed and why.`,
-      temperature: 0.3,
-      tools: agentTools(panel.id),
-      maxSteps: 12,
-      abortSignal: controller.signal,
-    });
-    const { textStream, usage } = result;
-    let output = '';
-    for await (const chunk of textStream) {
-      output += chunk;
-      if (firstTokenAt === null) {
-        firstTokenAt = Date.now();
-        if (onLive) onLive({ ttftMs: firstTokenAt - startedAt });
+    // Provider blocks (rate limits, quota, outages) can take forever with the
+    // SDK's default 2 retries + backoff. Disable retries entirely and cap each
+    // panel at PANEL_TIMEOUT_MS — the battle moves on and shows the result
+    // (success or failure) instead of hanging on a blocked panel.
+    const timeout = setTimeout(() => controller.abort(), PANEL_TIMEOUT_MS);
+    try {
+      const model = provider.create(key);
+      // AI SDK v4: streamText() returns a result object (textStream iterable +
+      // usage promise) — it is NOT a promise, so consume it directly.
+      // The agent gets tools to explore and EDIT its own isolated sandbox copy
+      // of the repo (maxSteps lets it iterate: read → change → verify).
+      const result = streamText({
+        model: model(panel.model),
+        system: systemPrompt(battleRef.current),
+        prompt: `${context}\n\nTASK:\n${task.prompt}\n\nYou are working inside an isolated copy of the repository. Use the provided tools (list_files, read_file, write_file) to explore the real code and make the changes the task asks for. When you write code, ALSO explain in your final answer what you changed and why.`,
+        temperature: 0.3,
+        tools: agentTools(panel.id),
+        maxSteps: 12,
+        maxRetries: 0,
+        abortSignal: controller.signal,
+      });
+      const { textStream, usage } = result;
+      let output = '';
+      for await (const chunk of textStream) {
+        output += chunk;
+        if (firstTokenAt === null) {
+          firstTokenAt = Date.now();
+          if (onLive) onLive({ ttftMs: firstTokenAt - startedAt });
+        }
+        const now = Date.now();
+        if (now - lastSampleAt > 120 || samples.length === 0) {
+          lastSampleAt = now;
+          samples.push({ tMs: now - startedAt, completionTokens: estTokens(output) });
+        }
+        onDelta(output);
       }
-      const now = Date.now();
-      if (now - lastSampleAt > 120 || samples.length === 0) {
-        lastSampleAt = now;
-        samples.push({ tMs: now - startedAt, completionTokens: estTokens(output) });
-      }
-      onDelta(output);
+      const u = await usage;
+      const doneAt = Date.now();
+      const elapsed = doneAt - startedAt;
+      const success = checkSuccess(output, task);
+      // Keep missing usage as null (not 0) so the UI shows '—' instead of
+      // fake '0 tokens' / '$0' values when the provider reports nothing.
+      const inputTokens = u?.inputTokens != null ? u.inputTokens : null;
+      const outputTokens = u?.outputTokens != null ? u.outputTokens : null;
+      const cost =
+        inputTokens != null || outputTokens != null
+          ? estimateCost(panel.model, inputTokens ?? 0, outputTokens ?? 0)
+          : null;
+      return {
+        status: 'done',
+        output,
+        timeMs: elapsed,
+        ttftMs: firstTokenAt ? firstTokenAt - startedAt : elapsed,
+        genMs: firstTokenAt ? doneAt - firstTokenAt : 0,
+        inputTokens,
+        outputTokens,
+        cost,
+        success,
+        samples,
+      };
+    } finally {
+      clearTimeout(timeout);
+      abortRef.current.delete(controller);
     }
-    const u = await usage;
-    const doneAt = Date.now();
-    const elapsed = doneAt - startedAt;
-    const success = checkSuccess(output, task);
-    // Keep missing usage as null (not 0) so the UI shows '—' instead of
-    // fake '0 tokens' / '$0' values when the provider reports nothing.
-    const inputTokens = u?.inputTokens != null ? u.inputTokens : null;
-    const outputTokens = u?.outputTokens != null ? u.outputTokens : null;
-    const cost =
-      inputTokens != null || outputTokens != null
-        ? estimateCost(panel.model, inputTokens ?? 0, outputTokens ?? 0)
-        : null;
-    return {
-      status: 'done',
-      output,
-      timeMs: elapsed,
-      ttftMs: firstTokenAt ? firstTokenAt - startedAt : elapsed,
-      genMs: firstTokenAt ? doneAt - firstTokenAt : 0,
-      inputTokens,
-      outputTokens,
-      cost,
-      success,
-      samples,
-    };
   }
 
   function setPanelResult(taskIndex, panelId, patch) {
@@ -271,7 +286,11 @@ export default function BattlePage({ onBack }) {
             );
             setPanelResult(i, panel.id, out);
           } catch (err) {
-            setPanelResult(i, panel.id, { status: 'error', error: err.message });
+            const aborted = err?.name === 'AbortError' || /aborted|timed out|timeout/i.test(String(err?.message || ''));
+            setPanelResult(i, panel.id, {
+              status: 'error',
+              error: aborted ? `Timed out after ${Math.round(PANEL_TIMEOUT_MS / 1000)}s — the provider did not respond.` : err.message,
+            });
           }
         })
       );
@@ -315,23 +334,30 @@ export default function BattlePage({ onBack }) {
 
   const summary = useMemo(() => {
     if (results.length === 0) return null;
-    const done = results.filter((r) => r.panels.acc?.status === 'done' && r.panels.plain?.status === 'done');
-    if (done.length === 0) return null;
-    const acc = done.map((r) => r.panels.acc);
-    const plain = done.map((r) => r.panels.plain);
+    // Count every task; panels that errored are failures (not dropped), so a
+    // blocked panel shows as a loss instead of vanishing from the analysis.
+    const total = results.length;
+    const accDone = results.filter((r) => r.panels.acc?.status === 'done');
+    const plainDone = results.filter((r) => r.panels.plain?.status === 'done');
+    const acc = accDone.map((r) => r.panels.acc);
+    const plain = plainDone.map((r) => r.panels.plain);
     const avg = (arr, f) => {
       const vals = arr.map(f).filter((v) => v != null && Number.isFinite(v));
       return vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : null;
     };
-    const accWins = done.filter((r) => {
+    const accWins = results.filter((r) => {
       const a = r.panels.acc;
       const p = r.panels.plain;
+      if (!a || !p) return false;
+      if (a.status !== 'done' && p.status !== 'done') return false; // both failed → nobody wins
+      if (a.status !== 'done') return false; // acc failed → plain wins
+      if (p.status !== 'done') return true; // plain failed → acc wins
       if (a.success !== p.success) return a.success;
       return (a.timeMs ?? Infinity) < (p.timeMs ?? Infinity);
     }).length;
     return {
       accWins,
-      total: done.length,
+      total,
       time: { acc: avg(acc, (r) => r.timeMs), plain: avg(plain, (r) => r.timeMs) },
       tokens: {
         acc: avg(acc, (r) => (r.inputTokens != null || r.outputTokens != null ? (r.inputTokens ?? 0) + (r.outputTokens ?? 0) : null)),
@@ -358,7 +384,24 @@ export default function BattlePage({ onBack }) {
     if (startedRef.current) return;
     if (repo && battleStatus === 'idle') {
       startedRef.current = true;
-      startBattle();
+      // The sandbox APIs need the repo loaded server-side (server state is
+      // lost on restart/refresh). If it's missing, re-load it so the Code
+      // view and the agent tools keep working during the battle.
+      sandboxTree('acc')
+        .catch(() => {
+          if (!repo.source) return;
+          return loadRepo(repo.source).then((d) => {
+            const fresh = {
+              ...d.repo,
+              baseContext: d.baseContext,
+              accContext: d.accContext,
+              accPipeline: d.accPipeline || [],
+            };
+            setBattle({ ...battle, repo: fresh });
+            battleRef.current = { ...battle, repo: fresh };
+          });
+        })
+        .finally(() => startBattle());
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

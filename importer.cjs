@@ -17,16 +17,29 @@ function createSnapshotHash(projectDir, commitSha) {
   return createHash('sha256').update(content).digest('hex');
 }
 
-function copyDirectory(src, dest) {
+// Skip binary blobs (media, archives, large files) when creating sandboxes —
+// they slow the copy and the agents never edit them. Source snapshots keep
+// everything; only the per-panel sandbox copies filter them.
+const LARGE_BINARY_EXT = new Set([
+  '.mp3', '.mp4', '.wav', '.flac', '.ogg', '.m4a', '.aac', '.mov', '.avi', '.mkv', '.webm',
+  '.zip', '.tar', '.gz', '.tgz', '.bz2', '.xz', '.7z', '.rar',
+  '.jpg', '.jpeg', '.png', '.gif', '.webp', '.ico', '.pdf', '.exe', '.dmg', '.pkg', '.bin',
+]);
+
+function copyDirectory(src, dest, skipLargeBinary = false) {
   if (!statSync(src).isDirectory()) return;
   mkdirSync(dest, { recursive: true });
   const entries = require('fs').readdirSync(src, { withFileTypes: true });
   for (const entry of entries) {
+    if (entry.name === '.git' || entry.name === 'node_modules') continue;
     const srcPath = join(src, entry.name);
     const destPath = join(dest, entry.name);
     if (entry.isDirectory()) {
-      copyDirectory(srcPath, destPath);
+      copyDirectory(srcPath, destPath, skipLargeBinary);
     } else if (entry.isFile()) {
+      if (skipLargeBinary && LARGE_BINARY_EXT.has(entry.name.slice(entry.name.lastIndexOf('.')).toLowerCase())) {
+        continue;
+      }
       copyFileSync(srcPath, destPath);
     }
   }
@@ -142,7 +155,9 @@ async function createLocalSnapshot(projectDir, sandboxDir) {
 }
 
 /**
- * Clone a GitHub repository into the sandbox.
+ * Clone a GitHub repository into the sandbox. Shallow (--depth 1): the
+ * benchmark only needs the current revision — cloning full history makes
+ * big repos (media, docs) take minutes and fills the sandbox.
  */
 async function cloneGithubRepo(owner, repo, sandboxDir) {
   const repoUrl = 'https://github.com/' + owner + '/' + repo + '.git';
@@ -150,7 +165,7 @@ async function cloneGithubRepo(owner, repo, sandboxDir) {
   mkdirSync(dirname(targetDir), { recursive: true });
   rmSync(targetDir, { recursive: true, force: true });
 
-  runGit('clone ' + repoUrl + ' ' + targetDir);
+  runGit('clone --depth 1 ' + repoUrl + ' ' + targetDir);
   return targetDir;
 }
 
@@ -162,7 +177,7 @@ async function cloneGitRepo(gitUrl, revision, sandboxDir) {
   mkdirSync(dirname(targetDir), { recursive: true });
   rmSync(targetDir, { recursive: true, force: true });
 
-  const args = 'clone ' + gitUrl + ' ' + targetDir;
+  const args = 'clone --depth 1 ' + gitUrl + ' ' + targetDir;
   if (revision) {
     args += ' --branch=' + revision;
   }

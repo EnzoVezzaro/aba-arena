@@ -108,9 +108,14 @@ function buildTree(root) {
 }
 
 // .acc is NOT skipped — the ACC panel's sandbox must show the framework
-// installed inside the repo (acc init creates it). Only VCS, deps and build
-// noise are hidden.
+// installed inside the repo (acc init creates it). Only VCS, deps, build
+// noise and binary blobs are hidden.
 const SKIP_SANDBOX_DIRS = new Set(['.git', 'node_modules', 'dist', 'build', 'coverage']);
+const SKIP_SANDBOX_EXT = new Set([
+  '.mp3', '.mp4', '.wav', '.flac', '.ogg', '.m4a', '.aac', '.mov', '.avi', '.mkv', '.webm',
+  '.zip', '.tar', '.gz', '.tgz', '.bz2', '.xz', '.7z', '.rar',
+  '.jpg', '.jpeg', '.png', '.gif', '.webp', '.ico', '.pdf', '.exe', '.dmg', '.pkg', '.bin', '.woff', '.woff2', '.ttf',
+]);
 
 /** Recursive file tree for the sandbox explorer: [{ path, type, size, children }]. */
 function buildSandboxTree(root, target) {
@@ -137,8 +142,10 @@ function buildSandboxTree(root, target) {
         } catch {
           children = [];
         }
-        entries.push({ path: rel, type: 'dir', children });
+        if (children.length > 0) entries.push({ path: rel, type: 'dir', children });
       } else {
+        const ext = e.name.slice(e.name.lastIndexOf('.')).toLowerCase();
+        if (SKIP_SANDBOX_EXT.has(ext)) return; // binary blobs hidden
         let size = 0;
         try {
           size = fs.statSync(abs).size;
@@ -392,8 +399,10 @@ async function handleApi(req, res, url) {
       const plainDir = path.join(sandboxRoot, 'plain');
       fs.mkdirSync(accDir, { recursive: true });
       fs.mkdirSync(plainDir, { recursive: true });
-      copyDirectory(workDir, accDir);
-      copyDirectory(workDir, plainDir);
+      // Skip media/archive blobs in the sandbox copies — they slow the copy
+      // and the agents never edit them. The source snapshot keeps everything.
+      copyDirectory(workDir, accDir, true);
+      copyDirectory(workDir, plainDir, true);
 
       // ACC onboarding pipeline runs on the ACC sandbox only — the plain
       // sandbox stays untouched so the benchmark compares framework vs no.
