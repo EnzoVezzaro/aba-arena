@@ -629,7 +629,7 @@ export default function App() {
 
   /* Battle -------------------------------------------------------------- */
 
-  function runPanel(panel, context, task, onDelta, onLive) {
+  async function runPanel(panel, context, task, onDelta, onLive) {
     const provider = getProvider(panel.provider);
     const key = panel.apiKey || loadKeys()[panel.provider];
     if (provider.needsKey && !key) {
@@ -643,45 +643,46 @@ export default function App() {
     let lastSampleAt = 0;
 
     const model = provider.create(key);
-    return streamText({
+    // AI SDK v4: streamText() returns a result object (textStream iterable +
+    // usage promise) — it is NOT a promise, so consume it directly.
+    const result = streamText({
       model: model(panel.model),
       system: systemPrompt,
       prompt: `${context}\n\nTASK:\n${task.prompt}`,
       temperature: 0.3,
       abortSignal: controller.signal,
-    }).then(async (result) => {
-      const { textStream, usage } = result;
-      let output = '';
-      for await (const chunk of textStream) {
-        output += chunk;
-        if (firstTokenAt === null) {
-          firstTokenAt = Date.now();
-          if (onLive) onLive({ ttftMs: firstTokenAt - startedAt });
-        }
-        const now = Date.now();
-        if (now - lastSampleAt > 120 || samples.length === 0) {
-          lastSampleAt = now;
-          samples.push({ tMs: now - startedAt, completionTokens: estTokens(output) });
-        }
-        onDelta(output);
-      }
-      const u = await usage;
-      const doneAt = Date.now();
-      const elapsed = doneAt - startedAt;
-      const success = checkSuccess(output, task);
-      return {
-        status: 'done',
-        output,
-        timeMs: elapsed,
-        ttftMs: firstTokenAt ? firstTokenAt - startedAt : elapsed,
-        genMs: firstTokenAt ? doneAt - firstTokenAt : 0,
-        inputTokens: u?.inputTokens ?? 0,
-        outputTokens: u?.outputTokens ?? 0,
-        cost: estimateCost(panel.model, u?.inputTokens ?? 0, u?.outputTokens ?? 0),
-        success,
-        samples,
-      };
     });
+    const { textStream, usage } = result;
+    let output = '';
+    for await (const chunk of textStream) {
+      output += chunk;
+      if (firstTokenAt === null) {
+        firstTokenAt = Date.now();
+        if (onLive) onLive({ ttftMs: firstTokenAt - startedAt });
+      }
+      const now = Date.now();
+      if (now - lastSampleAt > 120 || samples.length === 0) {
+        lastSampleAt = now;
+        samples.push({ tMs: now - startedAt, completionTokens: estTokens(output) });
+      }
+      onDelta(output);
+    }
+    const u = await usage;
+    const doneAt = Date.now();
+    const elapsed = doneAt - startedAt;
+    const success = checkSuccess(output, task);
+    return {
+      status: 'done',
+      output,
+      timeMs: elapsed,
+      ttftMs: firstTokenAt ? firstTokenAt - startedAt : elapsed,
+      genMs: firstTokenAt ? doneAt - firstTokenAt : 0,
+      inputTokens: u?.inputTokens ?? 0,
+      outputTokens: u?.outputTokens ?? 0,
+      cost: estimateCost(panel.model, u?.inputTokens ?? 0, u?.outputTokens ?? 0),
+      success,
+      samples,
+    };
   }
 
   function setPanelResult(taskIndex, panelId, patch) {
