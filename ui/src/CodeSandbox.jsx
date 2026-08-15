@@ -18,14 +18,29 @@ export default function CodeSandbox({ panel, repoName }) {
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
+    let alive = true;
+    let retries = 0;
     setTree(null);
     setSelected('');
     setContent('');
     setError('');
     setOpenDirs(new Set(['']));
-    sandboxTree(panelId)
-      .then((r) => setTree(r.tree || []))
-      .catch((e) => setError(e.message));
+    // Retry a couple of times — the battle page may still be re-establishing
+    // the repo server-side after a restart/refresh ("no repo loaded").
+    const load = () =>
+      sandboxTree(panelId)
+        .then((r) => alive && setTree(r.tree || []))
+        .catch((e) => {
+          if (retries++ < 2 && alive) {
+            setTimeout(load, 1200);
+          } else if (alive) {
+            setError(e.message);
+          }
+        });
+    load();
+    return () => {
+      alive = false;
+    };
   }, [panelId]);
 
   useEffect(() => {
