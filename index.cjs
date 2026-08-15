@@ -7,9 +7,9 @@
  * it and works without it. The `acc` CLI can launch it (`acc battle`) but
  * only as a convenience — you can also run it directly:
  *
- *   node aba/index.cjs                     # spawn the battle arena web app
- *   node aba/index.cjs ./my-project        # web app with a repo preloaded
- *   node aba/index.cjs ./my-project --headless --local   # terminal mode
+ *   node index.cjs                        # spawn the battle arena web app
+ *   node index.cjs ./my-project           # web app with a repo preloaded
+ *   node index.cjs ./my-project --headless --local   # terminal mode
  *
  * By default ABA starts a local web app (Vite + React) that runs a series
  * of side-by-side benchmarks — ACC framework installed vs plain repository

@@ -93,7 +93,7 @@ function printHelp() {
   console.log(`\
 ACC Battle Arena - Agent Benchmark Arena
 
-Usage: node aba/index.cjs [options] [project]
+Usage: node index.cjs [options] [project]
 
 By default ABA spawns the Vite web app (battle arena UI) in your browser.
 Use --headless to run a benchmark directly from the terminal instead.
@@ -115,9 +115,9 @@ Project sources (headless):
   Git: git URL with optional --revision
 
 Examples:
-  node aba/index.cjs                    # open the battle arena UI
-  node aba/index.cjs ./my-project       # open the UI with a repo preloaded
-  node aba/index.cjs ./my-project --headless --local
+  node index.cjs                    # open the battle arena UI
+  node index.cjs ./my-project       # open the UI with a repo preloaded
+  node index.cjs ./my-project --headless --local
 `);
 }
 

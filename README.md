@@ -36,13 +36,23 @@ benchmarks run in a container; otherwise (or with `--local`) on the host.
 
 ## Usage
 
+From inside this repository (run from the repo root):
+
 ```bash
 # Default — spawn the battle arena web app and open the browser:
-node aba/index.cjs
-node aba/index.cjs ./my-project      # open the UI with a repo preloaded
+node index.cjs
+node index.cjs ./my-project      # open the UI with a repo preloaded
 
 # Headless — run a single benchmark from the terminal:
-node aba/index.cjs ./my-project --headless --local
+node index.cjs ./my-project --headless --local
+```
+
+Installed as a package, run it anywhere:
+
+```bash
+# Published npm package (also a dependency of acc-agents):
+npx acc-battle-arena
+npx acc-battle-arena ./my-project
 
 # Via the acc CLI (convenience launcher):
 acc battle ./my-project              # opens the arena
@@ -84,7 +94,7 @@ browser-based arena that compares AI models side by side: the same prompt,
 streamed answers, live code previews, speed, tokens, and cost, with API keys
 that never leave your browser. We use its battle-arena concept, the metric
 pill + per-metric winner logic, code extraction helpers, blind mode, and
-history pattern in the ABA UI (`aba/ui/src/arena.js` is adapted from it).
+history pattern in the ABA UI (`ui/src/arena.js` is adapted from it).
 Live at [isbetter.ai](https://isbetter.ai/).
 
 Thanks also to the open standards ABA interoperates with:
@@ -94,8 +104,8 @@ and [MCP](https://modelcontextprotocol.io/), and to the Vercel
 
 ## Development
 
-- `aba/cli.cjs` — argument parsing and battle configuration
-- `aba/importer.cjs` — project import and isolated snapshots
-- `aba/sandbox.cjs` — sandbox backends (Docker container, local host)
-- `aba/results.cjs` — result collection and diff reports
-- `aba/index.cjs` — standalone entry point
+- `cli.cjs` — argument parsing and battle configuration
+- `importer.cjs` — project import and isolated snapshots
+- `sandbox.cjs` — sandbox backends (Docker container, local host)
+- `results.cjs` — result collection and diff reports
+- `index.cjs` — standalone entry point
