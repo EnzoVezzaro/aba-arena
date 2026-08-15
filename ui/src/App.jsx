@@ -1,13 +1,14 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { PROVIDERS, getProvider, loadKeys, fetchProviderModels } from './providers.js';
 import { DEFAULT_TASKS } from './tasks.js';
-import { health, loadRepo } from './api.js';
+import { health, loadRepo, deleteBattle, deleteAllBattles } from './api.js';
 import IconSprite from './icons.jsx';
 import {
   Icon,
   PanelConfig,
   KeyModal,
   HistoryDrawer,
+  SettingsModal,
   DEFAULT_SYSTEM,
   TASK_EXAMPLES,
   HISTORY_KEY,
@@ -15,11 +16,58 @@ import {
   INITIAL_PANELS,
   loadHistory,
   saveHistory,
+  loadGithub,
 } from './components.jsx';
 
 const navigateToBattle = () => {
   window.location.href = '/battle';
 };
+
+/* GitHub repo suggestions under the repository box — shown when the user's
+   GitHub account is connected in Settings. Filter as you type. */
+function RepoSuggestions({ repos, filter, onFilter, onPick }) {
+  const [open, setOpen] = useState(true);
+  const list = filter
+    ? repos.filter((r) => r.full.toLowerCase().includes(filter.toLowerCase()) || (r.language || '').toLowerCase().includes(filter.toLowerCase()))
+    : repos;
+  return (
+    <div className="mt-2 overflow-hidden rounded-xl border border-[var(--color-line)] bg-[var(--color-surface)]">
+      <div className="flex items-center gap-2 border-b border-[var(--color-line)] px-3 py-2">
+        <Icon name="link" className="size-3.5 text-[var(--color-ink-faint)]" />
+        <input
+          value={filter}
+          onChange={(e) => {
+            onFilter(e.target.value);
+            setOpen(true);
+          }}
+          placeholder={`Filter ${repos.length} GitHub repos…`}
+          spellCheck="false"
+          className="min-w-0 flex-1 bg-transparent text-[12px] text-[var(--color-ink)] outline-none placeholder:text-[var(--color-ink-faint)]"
+        />
+        <button onClick={() => setOpen((v) => !v)} aria-label="Toggle repo list" className="text-[var(--color-ink-faint)] hover:text-[var(--color-ink)]">
+          <Icon name="chevron" className={`size-3.5 transition-transform ${open ? 'rotate-180' : ''}`} />
+        </button>
+      </div>
+      {open && (
+        <ul className="no-scrollbar max-h-48 overflow-y-auto">
+          {list.length === 0 && <li className="px-3 py-2 text-[11px] text-[var(--color-ink-faint)]">no repos match</li>}
+          {list.map((r) => (
+            <li key={r.full}>
+              <button
+                onClick={() => onPick(r.full)}
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-left transition-colors hover:bg-[var(--color-panel-hi)]"
+              >
+                <Icon name="folder" className="size-3.5 shrink-0 text-[var(--color-ink-faint)]" />
+                <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--color-ink-dim)]">{r.full}</span>
+                {r.language && <span className="shrink-0 rounded-md bg-[var(--color-panel-hi)] px-1.5 py-0.5 text-[9px] uppercase text-[var(--color-ink-faint)]">{r.language}</span>}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
 
 /* ------------------------------------------------------------------------ */
 /* App — home / arena config page. Configure the benchmark, then Run battle  */
@@ -43,7 +91,10 @@ export default function App() {
 
   const [history, setHistory] = useState([]);
   const [keyModal, setKeyModal] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [github, setGithub] = useState(loadGithub);
+  const [ghFilter, setGhFilter] = useState('');
   const [liveModels, setLiveModels] = useState({}); // providerId -> model ids (fetched with key)
   const [modelsLoading, setModelsLoading] = useState({}); // providerId -> true while fetching
 
@@ -171,6 +222,7 @@ export default function App() {
           name: repo.name,
           source: repo.source,
           sha: repo.sha,
+          battleId: repo.battleId,
           baseContext: repo.baseContext,
           accContext: repo.accContext,
           accPipeline: repo.accPipeline || [],
@@ -186,9 +238,29 @@ export default function App() {
     navigateToBattle();
   }
 
-  function clearHistory() {
-    localStorage.removeItem(HISTORY_KEY);
+  // Delete one run: remove it from local history AND delete its sandboxes +
+  // report on the server (the server keeps each battle isolated on disk).
+  async function deleteHistoryItem(h) {
+    const id = h.battleId || h.id;
+    try {
+      await deleteBattle(id);
+    } catch {
+      // Server already gone (restarted, sandbox wiped) — still remove locally.
+    }
+    const next = history.filter((x) => x.id !== h.id);
+    setHistory(next);
+    saveHistory(next);
+  }
+
+  // Clear all: wipe local history AND every server-side battle + report.
+  async function clearHistory() {
+    try {
+      await deleteAllBattles();
+    } catch {
+      // Server unreachable — still clear locally.
+    }
     setHistory([]);
+    saveHistory([]);
   }
 
   const accPipeline = repo?.accPipeline || [];
@@ -235,6 +307,15 @@ export default function App() {
               <span className="hidden sm:inline">API keys</span>
               <span className="size-1.5 rounded-full bg-[var(--color-accent)]" aria-hidden="true" />
               <kbd className="key-hint">K</kbd>
+            </button>
+            <button
+              onClick={() => setSettingsOpen(true)}
+              aria-label="Open settings"
+              className="control-surface relative flex min-h-9 items-center gap-2 px-2.5 text-[11px] sm:px-3"
+              title="Settings — providers, GitHub, data"
+            >
+              <Icon name="bolt" className="size-4" />
+              <span className="hidden sm:inline">Settings</span>
             </button>
           </nav>
         </header>
@@ -334,9 +415,16 @@ export default function App() {
                   <input
                     id="repo-input"
                     type="text"
-                    placeholder="Local path or GitHub URL — e.g. ./my-project or https://github.com/user/repo"
+                    placeholder={
+                      github.login
+                        ? `Search your GitHub repos or paste any URL — e.g. ${github.login}/repo…`
+                        : 'Local path or GitHub URL — e.g. ./my-project or https://github.com/user/repo'
+                    }
                     value={repoInput}
-                    onChange={(e) => setRepoInput(e.target.value)}
+                    onChange={(e) => {
+                      setRepoInput(e.target.value);
+                      setGhFilter('');
+                    }}
                     onKeyDown={(e) => e.key === 'Enter' && handleLoadRepo()}
                     spellCheck="false"
                     className="no-scrollbar block w-full bg-transparent px-4 py-3.5 text-[13px] leading-relaxed text-[var(--color-ink)] outline-none placeholder:text-[var(--color-ink-faint)] sm:text-[14px]"
@@ -350,6 +438,18 @@ export default function App() {
                     {loadingRepo ? `loading… ${loadElapsed}s` : 'Load'}
                   </button>
                 </div>
+                {/* GitHub account repo suggestions (when connected) */}
+                {github.login && github.repos.length > 0 && (
+                  <RepoSuggestions
+                    repos={github.repos}
+                    filter={ghFilter}
+                    onFilter={(f) => setGhFilter(f)}
+                    onPick={(full) => {
+                      setRepoInput(full);
+                      setGhFilter('');
+                    }}
+                  />
+                )}
                 {repo && (
                   <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-[var(--color-ink-dim)]">
                     <span className="inline-flex items-center gap-1 rounded-md border border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-[var(--color-accent)]">
@@ -496,12 +596,23 @@ export default function App() {
       {/* ============================ KEY MODAL ============================ */}
       <KeyModal open={keyModal} onClose={() => setKeyModal(false)} onSaved={() => refreshModels()} />
 
+      {/* ========================== SETTINGS MODAL ========================= */}
+      <SettingsModal
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        onDataChanged={() => {
+          setGithub(loadGithub());
+          refreshModels();
+        }}
+      />
+
       {/* ========================= HISTORY DRAWER ========================= */}
       <HistoryDrawer
         open={historyOpen}
         history={history}
         onClose={() => setHistoryOpen(false)}
         onClear={clearHistory}
+        onDelete={deleteHistoryItem}
       />
     </div>
   );

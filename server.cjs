@@ -410,6 +410,7 @@ async function handleApi(req, res, url) {
       const accResult = await buildAccContext(accDir, info, baseContext);
 
       currentRepo = {
+        battleId,
         name: info.sourceType === 'github' ? (source.split('/').pop() || 'repo') : path.basename(workDir),
         source,
         sha: info.commitSha,
@@ -419,7 +420,7 @@ async function handleApi(req, res, url) {
         accContext: accResult.context,
       };
       sendJson(res, 200, {
-        repo: { name: currentRepo.name, source, sha: info.commitSha },
+        repo: { name: currentRepo.name, source, sha: info.commitSha, battleId },
         baseContext,
         accContext: accResult.context,
         accPipeline: accResult.steps,
@@ -496,9 +497,39 @@ async function handleApi(req, res, url) {
       const body = await readBody(req);
       const dir = path.join(SANDBOX_DIR, 'reports');
       fs.mkdirSync(dir, { recursive: true });
-      const file = path.join(dir, `battle-${Date.now()}.json`);
+      // Name the report by battleId so deleting a history run can remove its
+      // sandbox AND its saved report together.
+      const id = /^[a-z0-9]+$/i.test(body.battleId || '') ? body.battleId : `b${Date.now().toString(36)}`;
+      const file = path.join(dir, `battle-${id}.json`);
       fs.writeFileSync(file, JSON.stringify(body, null, 2));
       sendJson(res, 200, { ok: true, file });
+    } catch (err) {
+      sendJson(res, 400, { error: err.message });
+    }
+    return;
+  }
+
+  // DELETE a battle: removes its isolated sandboxes and its saved report.
+  // Body: { id } deletes one battle; { all: true } wipes every battle.
+  if (method === 'POST' && url.pathname === '/api/battles/delete') {
+    try {
+      const body = await readBody(req);
+      const id = String(body.id || '');
+      if (body.all) {
+        fs.rmSync(path.join(SANDBOX_DIR, 'battles'), { recursive: true, force: true });
+        fs.rmSync(path.join(SANDBOX_DIR, 'reports'), { recursive: true, force: true });
+        if (currentRepo) currentRepo = null;
+        sendJson(res, 200, { ok: true, deleted: 'all' });
+        return;
+      }
+      if (!/^[a-z0-9]+$/i.test(id)) {
+        sendJson(res, 400, { error: 'invalid battle id' });
+        return;
+      }
+      fs.rmSync(path.join(SANDBOX_DIR, 'battles', id), { recursive: true, force: true });
+      fs.rmSync(path.join(SANDBOX_DIR, 'reports', `battle-${id}.json`), { force: true });
+      if (currentRepo && currentRepo.battleId === id) currentRepo = null;
+      sendJson(res, 200, { ok: true, deleted: id });
     } catch (err) {
       sendJson(res, 400, { error: err.message });
     }

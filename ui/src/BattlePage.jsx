@@ -318,8 +318,10 @@ export default function BattlePage({ onBack }) {
       if (a.success !== p.success) return a.success;
       return a.timeMs < p.timeMs;
     }).length;
+    const id = String(Date.now());
     history.unshift({
-      id: String(Date.now()),
+      id,
+      battleId: repo.battleId || id, // sandbox + report are keyed by this on the server
       ts: Date.now(),
       repoName: repo.name,
       repoSource: repo.source,
