@@ -70,8 +70,8 @@ snapshot.
 From this repository:
 
 ```bash
-node index.cjs                 # spawn the battle arena and open the browser
-node index.cjs ./my-project    # open the UI with a repo preloaded
+node src/index.cjs                 # spawn the battle arena and open the browser
+node src/index.cjs ./my-project    # open the UI with a repo preloaded
 ```
 
 Published package (also used by the `acc` CLI as a convenience launcher):
@@ -90,7 +90,7 @@ a task series (each task plan or act), and hit **Run battle**.
 ### Headless terminal benchmark
 
 ```bash
-node index.cjs ./my-project --headless --local
+node src/index.cjs ./my-project --headless --local
 ```
 
 | Option | Description |
@@ -119,7 +119,7 @@ win). See [`.env.example`](.env.example) for everything:
 ```
 aba/
 ├── src/             # backend (Node) — entry point, CLI, server, harness
-│   ├── index.cjs    #   entry point (web app + headless CLI)
+│   ├── src/index.cjs    #   entry point (web app + headless CLI)
 │   ├── cli.cjs      #   argument parsing + battle configuration
 │   ├── importer.cjs #   project import → isolated snapshots
 │   ├── sandbox.cjs  #   headless sandbox backends (Docker / local host)
@@ -131,7 +131,7 @@ aba/
 ├── freebuff/        # vendored Freebuff2API (optional local Freebuff proxy)
 ├── ui/              # React + Vite battle arena (source + AGENTS.md)
 ├── AGENTS.md        # ACC contract for this directory
-└── package.json     # npm package: `aba` bin → src/index.cjs
+└── package.json     # npm package: `aba` bin → src/src/index.cjs
 ```
 
 The UI (`ui/`) is a self-contained Vite app with its own `AGENTS.md`; the
@@ -143,7 +143,7 @@ integrations stay clearly separated.
 ```bash
 npm run build:ui          # install + build the Vite UI (first run auto-builds)
 npm run dev:ui            # Vite dev server with HMR (proxies /api to :4317)
-node index.cjs            # run the backend + serve the built UI
+node src/index.cjs            # run the backend + serve the built UI
 ```
 
 ## Credits & thanks
