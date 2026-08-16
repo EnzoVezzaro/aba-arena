@@ -154,7 +154,18 @@ class Sandbox {
 
   async createSnapshotArchive(snapshotDir) {
     return new Promise((resolve, reject) => {
-      const tar = require('child_process').spawn('tar', ['czf', '-', '-C', snapshotDir, '.']);
+      // Exclude VCS metadata and dependency/build noise: the container must
+      // contain only the repository files — never .git (remotes, history,
+      // host paths from worktree gitfiles) or node_modules.
+      const tar = require('child_process').spawn('tar', [
+        'czf', '-',
+        '--exclude=.git',
+        '--exclude=node_modules',
+        '--exclude=dist',
+        '--exclude=build',
+        '--exclude=coverage',
+        '-C', snapshotDir, '.',
+      ]);
       const chunks = [];
       tar.stdout.on('data', (data) => chunks.push(data));
       tar.stderr.on('data', () => {});
@@ -325,7 +336,20 @@ class LocalSandbox {
   }
 
   buildEnv() {
-    const env = { ...process.env };
+    // Deliberately NOT { ...process.env }: host variables (npm tokens,
+    // ABA_*, API keys, the user's real HOME) must never reach commands run
+    // inside a sandbox. Only a minimal, deterministic set is passed, and
+    // HOME points at the sandbox so CLIs cannot read the host user's config
+    // (e.g. ~/.npmrc, ~/.gitconfig).
+    const env = {
+      PATH: process.env.PATH || '/usr/bin:/bin',
+      HOME: this.snapshotDir || '/tmp',
+      LANG: 'C.UTF-8',
+      LC_ALL: 'C.UTF-8',
+      TZ: 'UTC',
+      TERM: 'dumb',
+      NO_COLOR: '1',
+    };
     if (this.config.env) {
       Object.assign(env, this.config.env);
     }

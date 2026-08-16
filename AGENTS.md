@@ -18,9 +18,15 @@ directory so the repository stays a single place to develop both.
 - Import a repository (local path or GitHub URL) into isolated snapshots —
   the original repository is never modified.
 - Build the two panel contexts: the plain `baseContext` and the ACC context
-  produced by the `acc` CLI pipeline (`acc init` → `acc graph` → `acc context`).
+  produced by the `acc` CLI pipeline (`acc init` → `acc build` → `acc fill`
+  → `acc graph` → `acc context`).
 - Provide sandboxed work areas (Docker container, falling back to the local
   host) where benchmark agents can read and edit files.
+- Guarantee panel isolation: each agent sees only its own sandbox copy of the
+  repo (no `.git`, no `node_modules`, no sibling battle dirs, no host paths),
+  sandbox copies never contain symlinks, the file API confines every path both
+  lexically and by real path, and commands run in a sandbox get a scrubbed env
+  (never the server's `process.env`).
 - Stream agent output in real time from the browser (Vercel AI SDK) — provider
   API keys never leave the browser and never touch the ABA backend.
 - Collect results, per-metric winners, success heuristics, and persist battle
@@ -69,6 +75,9 @@ Owner: aba
 - MUST NOT execute arbitrary code from the benchmarked repository (untrusted
   repo safety): agent tools are file read/write only, confined to the panel's
   sandbox copy.
+- MUST keep sandboxes fully isolated from each other and from the host: no
+  leakage between panels (shared state, absolute paths, or the other panel's
+  files in any context) and no way for one sandbox to read or modify another.
 - MUST NOT send provider keys or repository contents through the ABA backend —
   LLM calls happen in the browser, keys stay in the browser.
 - MUST NOT hang forever on a blocked or silent provider — panels race against

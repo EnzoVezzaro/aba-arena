@@ -183,16 +183,18 @@ function buildBaseContext(snapshotDir, info) {
 /**
  * ACC onboarding pipeline for the benchmark panel. Mirrors how a real
  * project adopts ACC, so the benchmark measures the framework honestly:
- *
- *   1. clone repo        → done by the importer (snapshotDir)
- *   2. install acc-cli   → resolveAcc() (npm-installed or npx on demand)
- *   3. acc init          → scaffold .acc/ + AGENTS.md contracts
- *   4. acc scan/prepare  → derive the architecture graph + focused context
- *   5. start challenge   → the assembled context below feeds the battle
- *
- * Returns { context, steps } — steps is a list of { step, label, ok, detail }
- * shown in the UI so the benchmark is transparent about what ACC did.
- */
+  *
+   *   1. clone repo        → done by the importer (snapshotDir)
+   *   2. install acc-cli   → resolveAcc() (npm-installed or npx on demand)
+   *   3. acc init          → scaffold .acc/ control plane + root memory record
+   *   4. acc build         → create the missing AGENTS.md contracts (+ memory)
+   *   5. acc fill          → fill directive: what an agent must complete
+   *   6. acc scan/prepare  → derive the architecture graph + focused context
+   *   7. start challenge   → the assembled context below feeds the battle
+  *
+  * Returns { context, steps } — steps is a list of { step, label, ok, detail }
+  * shown in the UI so the benchmark is transparent about what ACC did.
+  */
 async function buildAccContext(snapshotDir, info, baseContext) {
   const parts = [baseContext];
   const steps = [];
@@ -213,18 +215,54 @@ async function buildAccContext(snapshotDir, info, baseContext) {
     steps.push({ step: 3, label: 'acc init', ok: true, detail: 'already initialized (.acc/ present)' });
   }
 
-  // Step 4 — scan/prepare: derive the architecture graph, then the focused
+  // Step 4 — acc build: create the missing AGENTS.md contracts (+ initial
+  // .acc-memory.md records) so the ACC panel works against a documented
+  // project, not just a scaffold. Additive and idempotent by contract.
+  const build = await runAcc(['build', '--yes'], snapshotDir);
+  const builtContracts = (build.out.match(/^Created .*AGENTS\.md$/gm) || []).length;
+  steps.push({
+    step: 4,
+    label: 'acc build (contracts)',
+    ok: build.code === 0,
+    detail: build.code === 0
+      ? `created ${builtContracts} missing AGENTS.md contract${builtContracts === 1 ? '' : 's'}`
+      : (build.err || build.out || '').trim().slice(0, 200),
+  });
+
+  // Step 5 — acc fill: produce the generic fill directive so the coding
+  // agent completes the freshly generated AGENTS.md templates with
+  // accurate content (read-only analysis; the agent does the writing).
+  const fill = await runAcc(['fill', '--json'], snapshotDir);
+  let fillResult = {};
+  let fillSummary = {};
+  try {
+    fillResult = JSON.parse(fill.out).result || {};
+    fillSummary = fillResult.summary || {};
+  } catch {
+    // non-JSON output (e.g. error text) — leave the summary empty
+  }
+  steps.push({
+    step: 5,
+    label: 'acc fill (fill directive)',
+    ok: fill.code === 0,
+    detail: fill.code === 0
+      ? `${fillSummary.draft || 0} of ${fillSummary.total || 0} AGENTS.md files need filling ` +
+        `(${fillSummary.placeholder_items || 0} placeholder items)`
+      : (fill.err || fill.out || '').trim().slice(0, 200),
+  });
+
+  // Step 6 — scan/prepare: derive the architecture graph, then the focused
   // agent context that ACC contributes to a coding agent.
   const graph = await runAcc(['graph', '--format', 'text'], snapshotDir);
   steps.push({
-    step: 4,
+    step: 6,
     label: 'acc graph (scan)',
     ok: graph.code === 0,
     detail: graph.code === 0 ? 'architecture graph derived' : (graph.err || graph.out || '').trim().slice(0, 200),
   });
   const scan = await runAcc(['context', '.', '--depth', '1', '--max-bytes', '16000'], snapshotDir);
   steps.push({
-    step: 4,
+    step: 6,
     label: 'acc context (prepare)',
     ok: scan.code === 0,
     detail: scan.code === 0 ? 'focused agent context generated' : (scan.err || scan.out || '').trim().slice(0, 200),
@@ -242,6 +280,23 @@ async function buildAccContext(snapshotDir, info, baseContext) {
     }
   }
 
+  if (fill.code === 0 && fillResult.files && fillResult.files.length > 0) {
+    const pending = fillResult.files.filter((f) => f.status === 'draft');
+    if (pending.length > 0) {
+      parts.push('## ACC fill directive (acc fill)');
+      parts.push(fillResult.directive || 'Complete the placeholder AGENTS.md files.');
+      for (const f of pending) {
+        const items = [
+          ...f.missing.map((s) => `${s} (missing)`),
+          ...f.empty.map((s) => `${s} (empty)`),
+          ...f.placeholders.map((p) => `${p.section} (${p.count})`),
+        ];
+        if (items.length) parts.push(`- ${f.file}: ${items.join(', ')}`);
+      }
+      parts.push('');
+    }
+  }
+
   if (graph && graph.out.trim()) {
     parts.push('## ACC architecture graph (acc graph)');
     parts.push('```\n' + truncate(graph.out, 8000) + '\n```');
@@ -255,7 +310,10 @@ async function buildAccContext(snapshotDir, info, baseContext) {
   return { context: truncate(parts.join('\n\n'), MAX_CONTEXT_BYTES), steps };
 }
 
-/** Run the acc CLI in a directory; returns { code, out, err }. */
+/** Run the acc CLI in a directory; returns { code, out, err }.
+ *  The child is spawned detached into its own process group so that on
+ *  timeout the whole group (npx wrapper + acc child) is killed together —
+ *  a killed npx wrapper must never leave an orphaned acc process spinning. */
 function runAcc(args, cwd) {
   const acc = resolveAcc();
   // npm-installed / local dev copy → node <script>; npx on demand → npx directly.
@@ -266,14 +324,21 @@ function runAcc(args, cwd) {
     cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...process.env, NO_COLOR: '1' },
+    detached: true,
   });
   let out = '';
   let err = '';
+  let timedOut = false;
   const timer = setTimeout(() => {
+    timedOut = true;
     try {
-      child.kill('SIGKILL');
+      process.kill(-child.pid, 'SIGKILL');
     } catch {
-      // ignore
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        // ignore
+      }
     }
   }, 60000);
   return new Promise((resolve) => {
@@ -281,7 +346,11 @@ function runAcc(args, cwd) {
     child.stderr.on('data', (d) => (err += d));
     child.on('close', (code) => {
       clearTimeout(timer);
-      resolve({ code, out, err });
+      if (timedOut) {
+        resolve({ code: 124, out, err: `${err}\n[acc timed out after 60s]`.trim() });
+      } else {
+        resolve({ code, out, err });
+      }
     });
     child.on('error', (e) => {
       clearTimeout(timer);
@@ -293,6 +362,34 @@ function runAcc(args, cwd) {
 // ---------------------------------------------------------------------------
 // HTTP server
 // ---------------------------------------------------------------------------
+
+/**
+ * Remove battle sandboxes that were abandoned mid-battle — the user pressed
+ * back, closed the tab, or the battle never started — so ~/.aba-sandbox does
+ * not accumulate stale copies. A battle is "abandoned" when its sandbox exists
+ * but no battle-<id>.json report was ever saved for it; completed battles keep
+ * their sandbox for the history view (the UI deletes both together).
+ */
+function cleanupAbandonedBattles() {
+  const battlesDir = path.join(SANDBOX_DIR, 'battles');
+  let entries;
+  try {
+    entries = fs.readdirSync(battlesDir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    if (!/^[a-z0-9]+$/i.test(entry.name)) continue;
+    if (fs.existsSync(path.join(SANDBOX_DIR, 'reports', `battle-${entry.name}.json`))) continue;
+    try {
+      fs.rmSync(path.join(battlesDir, entry.name), { recursive: true, force: true });
+      console.log(`Cleaned up abandoned battle sandbox: ${entry.name}`);
+    } catch {
+      // best-effort cleanup
+    }
+  }
+}
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -390,6 +487,10 @@ async function handleApi(req, res, url) {
       const workDir = importResult.snapshotDir || importResult.originalDir;
       const info = importResult.snapshotInfo;
 
+      // Drop sandboxes from battles that were interrupted (back/closed tab)
+      // before this new one starts.
+      cleanupAbandonedBattles();
+
       // Two ISOLATED sandboxes — one per panel. Each gets its own copy of the
       // repo so the agents can edit files without affecting the other side or
       // the original repository.
@@ -445,11 +546,33 @@ async function handleApi(req, res, url) {
       return;
     }
     const rel = (url.searchParams.get('path') || '').replace(/^\/+/, '');
+    // Defense in depth: VCS, dependency and build-noise paths are never
+    // exposed — even though the sandbox copies never contain them, a
+    // requested path must not reach the resolver at all.
+    const firstSeg = rel.split('/')[0];
+    if (firstSeg && SKIP_SANDBOX_DIRS.has(firstSeg)) {
+      sendJson(res, 403, { error: 'path is not exposed in the sandbox' });
+      return;
+    }
     const target = path.resolve(sandboxDir, rel);
-    // Confine to the sandbox root; skip VCS, deps, and ACC control dirs in trees.
+    // Confine to the sandbox root — both lexically AND by real path, so a
+    // symlink inside the copy can never reach outside the panel sandbox
+    // (e.g. a sibling panel or the host filesystem).
     if (target !== sandboxDir && !target.startsWith(sandboxDir + path.sep)) {
       sendJson(res, 403, { error: 'path escapes the sandbox' });
       return;
+    }
+    try {
+      const realRoot = fs.realpathSync(sandboxDir);
+      const probe = fs.existsSync(target) ? target : path.dirname(target);
+      const realProbe = fs.realpathSync(probe);
+      if (!realProbe.startsWith(realRoot + path.sep)) {
+        sendJson(res, 403, { error: 'path escapes the sandbox' });
+        return;
+      }
+    } catch {
+      // Parent does not exist yet (a write creating new directories) — the
+      // lexical check above already confined it under the sandbox root.
     }
 
     if (action === 'tree') {
@@ -568,6 +691,7 @@ function ensureUiBuilt() {
 }
 
 function startServer(opts = {}) {
+  cleanupAbandonedBattles();
   return ensureUiBuilt().then((built) => {
     const server = createServer();
     server.listen(PORT, () => {
