@@ -1,62 +1,96 @@
 # ABA — ACC Battle Arena
 
-ABA is a **standalone benchmark application** used to test and evaluate the
-[ACC framework](https://github.com/EnzoVezzaro/agents-code-context).
+**ABA** is a standalone benchmark application that answers one question:
+
+> Does the **ACC framework** help an AI coding agent work with a repository
+> better than no ACC at all?
+
+It runs the same repository and the same task series on **two isolated
+sandboxes side by side** — one prepared with ACC (`acc init` → `acc build` →
+`acc fill` → `acc graph` → `acc context`), one plain — with real coding
+agents, plan/act tasks, automatic project verification, and a live Vite
+battle arena in your browser.
 
 > **ABA is not part of the ACC framework.** The framework never requires it
-> and works without it. ABA lives in this directory so the repository stays
-> a single place to develop both, but it is an independent tool with its own
-> entry point, dependencies, and lifecycle.
+> and works without it — ABA is an independent tool with its own entry
+> point, dependencies, and lifecycle.
+
+## Repositories
+
+ABA is part of the ACC ecosystem:
+
+- **[agents-code-context](https://github.com/EnzoVezzaro/agents-code-context)**
+  — the main repository: the ACC framework, its docs, and this directory
+  where ABA lives as a self-contained project
+- **[aba-arena](https://github.com/EnzoVezzaro/aba-arena)** — this project's
+  own repository (published to npm as `acc-battle-arena`)
+
+If ABA is useful to you, consider supporting the work:
+
+<iframe src="https://github.com/sponsors/EnzoVezzaro/button" title="Sponsor EnzoVezzaro" height="32" width="114" style="border: 0; border-radius: 6px;"></iframe>
 
 ## What it does
 
-ABA answers one question: **does the ACC framework help an AI agent work with
-a repository better than no ACC at all?**
-
-By default it spawns a local **Vite web app** (the battle arena) in your
-browser:
-
-- Two panels run the **same repo + same task series** side by side — one with
-  the ACC  framework installed (AGENTS.md contracts + `acc context` derived
-  via the npm-installed `acc-agents` package), one with a plain
-  repository.
-- **Provider and model are chosen per panel** (OpenAI, Anthropic, Google,
-  OpenRouter, Groq, DeepSeek, Mistral, xAI, Cerebras, or a local Ollama /
-  LM Studio endpoint). Keys live in your browser only — LLM calls never
-  touch the ABA backend.
-- Results **stream in real time**: output, time-to-first-token, generation
-  time, throughput, tokens, estimated cost, and a transparent success
-  heuristic, with per-metric "best" highlights, blind mode (judge without
-  knowing which panel has ACC), answer/code views, and local battle history.
-- You can **change the repository at any time** and load it into the battle.
+- **Real agents in sandboxes.** Each panel runs a coding-agent harness
+  (`harness.cjs`, modeled on mini-coding-agent) *inside its own isolated
+  sandbox copy* of the repo. The harness is driven by the Vercel AI SDK with
+  a custom base URL, so every supported provider works. The two sides can
+  never touch each other's files or the original repository.
+- **Plan/act tasks.** Every task has a mode: **plan** (the agent studies the
+  code and produces a plan, read-only) or **act** (the agent edits the code,
+  then the harness automatically **starts the project** — it reads
+  `package.json` scripts, runs the start/test/build command, and reports
+  whether the project still runs). A project that no longer starts fails the
+  task in the benchmark.
+- **The Answer panel is the sandbox terminal.** While a panel runs you watch
+  the agent work live: its `$` commands, tool results, and reasoning stream
+  into a terminal view — including the final "start the project" step and
+  the server output.
+- **Provider/model per panel** — OpenAI, Anthropic, Google Gemini, OpenRouter,
+  Groq, DeepSeek, Mistral, xAI, Cerebras, NVIDIA NIM, local Ollama / LM
+  Studio, and (optional) Freebuff's free models. Model lists load **live
+  from each provider's models endpoint**, with FREE chips and a "free"
+  search filter. Keys live in your browser (keyed providers) or in the local
+  proxy (Freebuff).
+- **Live metrics** — streaming output, time-to-first-token, generation time,
+  throughput, estimated cost, agent steps, and a transparent success
+  heuristic, with per-metric "best" highlights, **blind mode** (judge without
+  knowing which panel has ACC), answer/code views, the sandbox file explorer,
+  and local battle history.
+- **GitHub repo autocomplete** — connect your GitHub account in Settings
+  (OAuth popup) and your repos appear as suggestions under the repository
+  box, loading with your token (private repos work). A **folder browser**
+  loads local projects from disk.
 
 The original repository is never modified — ABA always works on an isolated
-snapshot. Docker is optional for the headless sandbox: when available,
-benchmarks run in a container; otherwise (or with `--local`) on the host.
+snapshot.
+
+## Quickstart
+
+From this repository:
+
+```bash
+node index.cjs                 # spawn the battle arena and open the browser
+node index.cjs ./my-project    # open the UI with a repo preloaded
+```
+
+Published package (also used by the `acc` CLI as a convenience launcher):
+
+```bash
+npx acc-battle-arena ./my-project
+acc battle ./my-project        # via acc-agents (latest: 0.4.0)
+```
 
 ## Usage
 
-From inside this repository (run from the repo root):
+The web app is the main interface: load a repository (local path, GitHub URL,
+or a connected-GitHub repo), pick a provider/model per panel, choose or write
+a task series (each task plan or act), and hit **Run battle**.
+
+### Headless terminal benchmark
 
 ```bash
-# Default — spawn the battle arena web app and open the browser:
-node index.cjs
-node index.cjs ./my-project      # open the UI with a repo preloaded
-
-# Headless — run a single benchmark from the terminal:
 node index.cjs ./my-project --headless --local
-```
-
-Installed as a package, run it anywhere:
-
-```bash
-# Published npm package (also a dependency of acc-agents):
-npx acc-battle-arena
-npx acc-battle-arena ./my-project
-
-# Via the acc CLI (convenience launcher):
-acc battle ./my-project              # opens the arena
-acc battle ./my-project --headless   # terminal benchmark
 ```
 
 | Option | Description |
@@ -69,43 +103,88 @@ acc battle ./my-project --headless   # terminal benchmark
 | `--model <model>` | Headless: default model for benchmark agents |
 | `--agent <name:model>` | Headless: specify a benchmark agent (repeatable) |
 
+## Configuration
+
+The server reads `aba/.env` automatically (real environment variables always
+win). See [`.env.example`](.env.example) for everything:
+
+- **GitHub OAuth** — `ABA_GITHUB_CLIENT_ID` / `ABA_GITHUB_CLIENT_SECRET` (the
+  "ACC Battle Arena" GitHub App; register `http://localhost:4317/api/github/callback`
+  as a redirect URI)
+- **Freebuff (optional)** — `ABA_FREEBUFF_TOKENS` and `ABA_FREEBUFF_AUTOSTART`
+  (ABA never runs the proxy on its own; see [`freebuff/README.md`](freebuff/README.md))
+
+## Project structure
+
+```
+aba/
+├── src/             # backend (Node) — entry point, CLI, server, harness
+│   ├── index.cjs    #   entry point (web app + headless CLI)
+│   ├── cli.cjs      #   argument parsing + battle configuration
+│   ├── importer.cjs #   project import → isolated snapshots
+│   ├── sandbox.cjs  #   headless sandbox backends (Docker / local host)
+│   ├── results.cjs  #   headless result collection + diff reports
+│   ├── server.cjs   #   local backend: repo load, ACC pipeline, sandbox API,
+│   │                #     agent-harness runner, model-list proxy, GitHub OAuth
+│   └── harness.cjs  #   the coding agent that runs INSIDE each sandbox
+│                    #     (AI SDK + custom base URL; plan/act; verify)
+├── freebuff/        # vendored Freebuff2API (optional local Freebuff proxy)
+├── ui/              # React + Vite battle arena (source + AGENTS.md)
+├── AGENTS.md        # ACC contract for this directory
+└── package.json     # npm package: `aba` bin → src/index.cjs
+```
+
+The UI (`ui/`) is a self-contained Vite app with its own `AGENTS.md`; the
+backend lives in `src/` so server code, the frontend, and optional
+integrations stay clearly separated.
+
 ## Development
 
 ```bash
-# Build the UI (first run builds automatically):
-npm run build:ui
-
-# Vite dev server with HMR (proxies /api to the backend on :4317):
-npm run dev:ui
+npm run build:ui          # install + build the Vite UI (first run auto-builds)
+npm run dev:ui            # Vite dev server with HMR (proxies /api to :4317)
+node index.cjs            # run the backend + serve the built UI
 ```
 
-## Status
+## Credits & thanks
 
-Experimental. Docker is optional — benchmarks fall back to the host when
-Docker is unavailable. The benchmark agent loop is a placeholder — real
-agent harnesses plug in here.
+ABA stands on the shoulders of the open source community. Explicit credit
+where it is due:
 
-## Credits
+- **[isbetter.ai](https://github.com/midudev/isbetter.ai)** by
+  [midudev](https://github.com/midudev) (MIT / FSL-1.1-MIT) — the battle
+  arena is adapted from it: the side-by-side arena concept, metric pills and
+  per-metric winner logic, code extraction helpers, blind mode, and the
+  history pattern (`ui/src/arena.js` is adapted from it). Live at
+  [isbetter.ai](https://isbetter.ai/).
+- **[Freebuff2API](https://github.com/Quorinex/Freebuff2API)** (MIT) — the
+  optional local Freebuff proxy, vendored under [`freebuff/`](freebuff/README.md),
+  which exposes Freebuff's free models to any OpenAI-compatible client.
+- **[mini-coding-agent](https://github.com/michaelmov/mini-coding-agent)** by
+  Michael Movsesov — the agentic loop (read → think → act → verify) the
+  harness is modeled on, wired to the Vercel [AI SDK](https://ai-sdk.dev/)
+  so every ABA provider works.
+- The **Vercel AI SDK** and its provider adapters, **React**, **Vite**, and
+  the open standards ABA interoperates with: [agents.md](https://agents.md/),
+  Agent Skills (https://agentskills.io/), and MCP
+  (https://modelcontextprotocol.io/).
 
-ABA's battle arena is adapted from
-[**isbetter.ai**](https://github.com/midudev/isbetter.ai) by
-[midudev](https://github.com/midudev) (MIT / FSL-1.1-MIT) — an open,
-browser-based arena that compares AI models side by side: the same prompt,
-streamed answers, live code previews, speed, tokens, and cost, with API keys
-that never leave your browser. We use its battle-arena concept, the metric
-pill + per-metric winner logic, code extraction helpers, blind mode, and
-history pattern in the ABA UI (`ui/src/arena.js` is adapted from it).
-Live at [isbetter.ai](https://isbetter.ai/).
+### To the open source community
 
-Thanks also to the open standards ABA interoperates with:
-[agents.md](https://agents.md/), [Agent Skills](https://agentskills.io/),
-and [MCP](https://modelcontextprotocol.io/), and to the Vercel
-[AI SDK](https://ai-sdk.dev/) for the streaming providers.
+Thank you — to every maintainer, contributor, and creator pushing this
+ecosystem forward. The tools we build here would not exist without the
+countless libraries, frameworks, and standards you release for free.
 
-## Development
+> **Gracias a toda la comunidad open source por los revolucionarios aportes
+> que están haciendo.** 🙌
 
-- `cli.cjs` — argument parsing and battle configuration
-- `importer.cjs` — project import and isolated snapshots
-- `sandbox.cjs` — sandbox backends (Docker container, local host)
-- `results.cjs` — result collection and diff reports
-- `index.cjs` — standalone entry point
+## Support
+
+ABA is free and open source. If it helps you benchmark and improve agent
+context, consider sponsoring:
+
+<iframe src="https://github.com/sponsors/EnzoVezzaro/card" title="Sponsor EnzoVezzaro" height="225" width="600" style="border: 0;"></iframe>
+
+## License
+
+[MIT](LICENSE)

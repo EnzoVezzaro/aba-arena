@@ -30,7 +30,7 @@ const { randomBytes, createHash } = require('crypto');
 // can live in aba/.env instead of the shell environment. Real environment
 // variables always win over the file.
 try {
-  const envFile = fs.readFileSync(path.join(__dirname, '.env'), 'utf8');
+  const envFile = fs.readFileSync(path.join(__dirname, '..', '.env'), 'utf8');
   for (const line of envFile.split('\n')) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith('#')) continue;
@@ -48,7 +48,7 @@ try {
 }
 
 const PORT = Number(process.env.ABA_PORT || 4317);
-const UI_DIST = path.join(__dirname, 'ui', 'dist');
+const UI_DIST = path.join(__dirname, '..', 'ui', 'dist');
 const SANDBOX_DIR = path.join(process.env.HOME || '/tmp', '.aba-sandbox');
 const MAX_CONTEXT_BYTES = 24000;
 const MAX_AGENTS_MD = 5;
@@ -124,8 +124,8 @@ const ghSessions = new Map();
 
 function findInstalledAcc() {
   const candidates = [
-    path.join(__dirname, 'node_modules', 'acc-agents', 'bin', 'acc.js'),
     path.join(__dirname, '..', 'node_modules', 'acc-agents', 'bin', 'acc.js'),
+    path.join(__dirname, '..', '..', 'node_modules', 'acc-agents', 'bin', 'acc.js'),
   ];
   for (const c of candidates) {
     if (fs.existsSync(c)) return { kind: 'npm-installed', path: c };
@@ -565,7 +565,7 @@ function checkFreebuffRunning() {
 // user explicitly asked for it. Default is OFF — see aba/freebuff/README.md.
 function maybeStartFreebuff() {
   if (process.env.ABA_FREEBUFF_AUTOSTART !== '1') return;
-  const script = path.join(__dirname, 'freebuff', 'start.cjs');
+  const script = path.join(__dirname, '..', 'freebuff', 'start.cjs');
   if (!fs.existsSync(script)) return;
   const child = spawn(process.execPath, [script], { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
   let out = '';
@@ -775,7 +775,7 @@ async function handleApi(req, res, url) {
         harness.installed = true;
         const probe = spawn(process.execPath, [path.join(accDir, '.aba-agent.cjs'), '--selfcheck'], {
           cwd: accDir,
-          env: { ...process.env, NODE_PATH: path.join(__dirname, 'ui', 'node_modules') },
+          env: { ...process.env, NODE_PATH: path.join(__dirname, '..', 'ui', 'node_modules') },
         });
         const probeOut = await new Promise((resolve) => {
           let out = '';
@@ -928,7 +928,7 @@ async function handleApi(req, res, url) {
     // Stream NDJSON events to the client, killing the harness on disconnect
     // or a hard deadline so a stuck provider can never leave a zombie.
     res.writeHead(200, { 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'no-cache' });
-    const nodePath = path.join(__dirname, 'ui', 'node_modules');
+    const nodePath = path.join(__dirname, '..', 'ui', 'node_modules');
     const env = {
       ...process.env,
       NODE_PATH: nodePath,
@@ -946,6 +946,9 @@ async function handleApi(req, res, url) {
     };
     const child = spawn(process.execPath, [harnessFile], { cwd: sandboxDir, env });
     let closed = false;
+    // Hard deadline so a stuck provider can never leave a zombie. Generous:
+    // tool loops with slow free models (e.g. NVIDIA nemotron-super) need a
+    // few minutes for several round trips.
     const hardTimer = setTimeout(() => {
       try {
         child.kill('SIGKILL');
@@ -954,9 +957,9 @@ async function handleApi(req, res, url) {
       }
       if (!closed) {
         closed = true;
-        res.end('{"type":"error","message":"Timed out after 120s — the provider did not respond."}\n');
+        res.end('{"type":"error","message":"Timed out after 240s — the provider did not respond."}\n');
       }
-    }, 120000);
+    }, 240000);
     child.stdout.on('data', (d) => {
       if (!closed) res.write(d);
     });
@@ -1077,8 +1080,8 @@ function ensureUiBuilt() {
   if (fs.existsSync(path.join(UI_DIST, 'index.html'))) return Promise.resolve(true);
   const { execSync } = require('child_process');
   try {
-    execSync('npm install --no-audit --no-fund', { cwd: path.join(__dirname, 'ui'), stdio: 'inherit' });
-    execSync('npm run build', { cwd: path.join(__dirname, 'ui'), stdio: 'inherit' });
+    execSync('npm install --no-audit --no-fund', { cwd: path.join(__dirname, '..', 'ui'), stdio: 'inherit' });
+    execSync('npm run build', { cwd: path.join(__dirname, '..', 'ui'), stdio: 'inherit' });
     return Promise.resolve(true);
   } catch (err) {
     console.error('Failed to build the ABA UI:', err.message);

@@ -1,19 +1,15 @@
 {
   "name": "acc-battle-arena",
-  "version": "0.1.11",
-  "description": "ACC Battle Arena (ABA) — side-by-side agent benchmarks (ACC vs no-ACC) with a live Vite web app. Standalone benchmark application, not part of the ACC framework.",
+  "version": "0.2.0",
+  "description": "ABA — ACC Battle Arena: side-by-side agent benchmarks (ACC vs no-ACC) with a live Vite battle arena. Real coding agents run inside isolated sandboxes with plan/act tasks and automatic project verification. Standalone; the ACC framework never depends on it.",
   "license": "MIT",
-  "main": "index.cjs",
+  "main": "src/index.cjs",
   "bin": {
-    "aba": "./index.cjs"
+    "aba": "./src/index.cjs"
   },
   "files": [
-    "index.cjs",
-    "cli.cjs",
-    "importer.cjs",
-    "results.cjs",
-    "sandbox.cjs",
-    "server.cjs",
+    "src",
+    "freebuff",
     "ui/dist",
     "ui/package.json",
     "README.md",
@@ -28,6 +24,9 @@
   },
   "engines": {
     "node": ">=18"
+  },
+  "dependencies": {
+    "acc-agents": "^0.4.0"
   },
   "optionalDependencies": {
     "dockerode": "^4.0.0"

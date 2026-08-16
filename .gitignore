@@ -1,20 +1,18 @@
-# Dependencies
+# Dependencies — lockfiles ARE committed (npm is the package manager).
 node_modules/
-bun.lock
-package-lock.json
-ui/package-lock.json
 ui/node_modules/
 
-# Build output — the UI dist is published to npm but never committed.
+# Build output — the UI dist is built on publish (prepare) and never committed.
 ui/dist/
 
 # OS
 .DS_Store
 
-# Secrets — never commit .env (client secrets, tokens)
+# Secrets — never commit .env (client secrets, Freebuff tokens). Copy
+# .env.example to .env and fill in your values.
 .env
 
-# Runtime sandbox artifacts
+# Runtime artifacts (per-machine, regenerated)
 ~/.aba-sandbox/
 reports/
 .acc-memory.md

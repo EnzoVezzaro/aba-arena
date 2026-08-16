@@ -36,7 +36,7 @@
  */
 
 const { tool, streamText } = require('ai');
-const { createOpenAICompatible } = require('@ai-sdk/openai-compatible');
+const { createOpenAI } = require('@ai-sdk/openai');
 const { createAnthropic } = require('@ai-sdk/anthropic');
 const { z } = require('zod');
 const { spawn } = require('node:child_process');
@@ -253,10 +253,18 @@ function createModel(kind, baseURL, apiKey) {
     const provider = createAnthropic({ apiKey, baseURL });
     return provider.languageModel(process.env.ABA_MODEL);
   }
-  const provider = createOpenAICompatible({
+  // OpenAI-compatible providers go through the NATIVE OpenAI adapter with
+  // compatibility:'compatible' (the SDK's recommended mode for custom base
+  // URLs). parallelToolCalls:false sends parallel_tool_calls:false so models
+  // that only support ONE tool call per response (e.g. NVIDIA's
+  // llama-3.1-8b) work instead of erroring with "only supports single
+  // tool-calls at once".
+  const provider = createOpenAI({
     name: 'aba-harness',
     baseURL: baseURL || 'https://api.openai.com/v1',
     apiKey: apiKey || 'none',
+    compatibility: 'compatible',
+    parallelToolCalls: false,
   });
   // The AI SDK v4 provider is a callable function: provider(modelId).
   return provider(process.env.ABA_MODEL);

@@ -3,16 +3,21 @@
 ## Purpose
 
 The ABA battle-arena web app: a React + Vite single-page application for
-configuring and running side-by-side ACC vs no-ACC benchmarks with live
-LLM streaming, per-panel provider/model choice, blind mode, code views,
-timeline, and local history.
+configuring and running side-by-side ACC vs no-ACC benchmarks: per-panel
+provider/model choice, plan/act task series, the sandbox-terminal Answer
+panel, blind mode, code views, timeline, and local history.
 
 ## Responsibilities
 
-- Render the config page (repo selection, provider/model setup, task series)
-  and the battle page (panels, streaming answers, summary, winners).
-- Stream agent output in the browser via the Vercel AI SDK — provider API
-  keys stay in the browser and never touch the ABA backend.
+- Render the config page (repo selection, provider/model setup, task series
+  with plan/act modes) and the battle page (panels, streaming terminal +
+  answers, summary, winners).
+- Consume the agent harness's NDJSON event stream via `runAgent()`
+  (api.js) and render it: `delta` answer text, and the sandbox terminal
+  (`cmd` / `out` / `reasoning`) in the Answer panel while a panel runs.
+- Fetch live model lists per provider (through the server's `/api/models`
+  proxy; locally for Ollama/LM Studio), gate the optional Freebuff provider
+  on its running state, and mark free models with a FREE chip.
 - Provide answer/code views, the timeline, the file-explorer/code-sandbox
   views, and the local battle history (localStorage) and key storage.
 - Keep blind mode honest: shuffled panel aliases, no ACC/no-ACC styling or
@@ -25,23 +30,28 @@ Owner: ui
 ## Inputs
 
 - The ABA server REST API (`/api/...`): battle context, repo metadata, the
-  panel sandbox file tree, file reads/writes, reports, battle deletion.
+  agent-harness run stream (`/api/agent/run`), the panel sandbox file tree,
+  file reads/writes, reports, battle deletion, model-list proxy, Freebuff
+  status.
 - Provider API keys and battle history from the browser (localStorage).
 
 ## Outputs
 
 - The built bundle (`ui/dist/`, gitignored) served by `server.cjs`.
-- Live battle streams and per-task/per-metric results rendered to the user.
+- Live battle streams (sandbox terminal + answers) and per-task/per-metric
+  results rendered to the user.
 
 ## Dependencies
 
 - ui/src        the React application source
-- (external npm packages: react, vite, and the AI SDK with its provider adapters)
+- (external npm packages: react, vite, and — resolved by the server's
+  harness via NODE_PATH — the AI SDK with its provider adapters)
 
 ## Constraints
 
-- MUST NOT send provider keys or repository contents through the ABA
-  backend — all LLM calls happen in the browser.
+- MUST NOT send repository contents anywhere except the local ABA server;
+  provider keys go to the server only for the duration of a run (the harness
+  inside the sandbox needs them) and to the provider.
 - MUST NOT reveal which panel runs ACC while blind mode is active.
 - MUST NOT hang on a blocked or silent provider — panels race against
   hard and idle timeouts and fail with a clear message instead.

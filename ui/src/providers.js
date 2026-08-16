@@ -27,7 +27,12 @@ const MODELS_API = {
   mistral: { kind: 'openai', public: false },
   xai: { kind: 'openai', public: false },
   cerebras: { kind: 'openai', public: false },
-  nvidia: { kind: 'openai', public: true },
+  // The harness is model-driven: the model chooses its own tools and the
+  // SDK executes them. NVIDIA's meta/llama-*instruct* models reject assistant
+  // messages carrying 2+ tool calls ("only supports single tool-calls at
+  // once"), so they can't run the agent loop — filter them out of the picker
+  // and keep the nemotron family, which handles tool loops.
+  nvidia: { kind: 'openai', public: true, toolFilter: (id) => !/^meta\/llama/.test(id) },
   ollama: { kind: 'openai', noKey: true, local: true },
   lmstudio: { kind: 'openai', noKey: true, local: true },
   // Optional local Freebuff proxy (aba/freebuff) — its /v1/models is the
@@ -87,7 +92,8 @@ export async function fetchProviderModels(providerId, key) {
     throw new Error(body.error || `HTTP ${res.status} ${res.statusText}`);
   }
   const json = await res.json();
-  return cfg.kind === 'anthropic' ? parseAnthropicModels(json) : parseOpenAIModels(json);
+  const ids = cfg.kind === 'anthropic' ? parseAnthropicModels(json) : parseOpenAIModels(json);
+  return cfg.toolFilter ? ids.filter(cfg.toolFilter) : ids;
 }
 
 // Providers whose model list can be fetched without an API key (their
@@ -186,12 +192,15 @@ export const PROVIDERS = [
     needsKey: true,
     create: (key) =>
       createOpenAICompatible({ name: 'nvidia', baseURL: 'https://integrate.api.nvidia.com/v1', apiKey: key }),
+    // Only models that support the full multi-tool-call round trip belong
+    // here — the harness is model-driven (the model chooses its own tools)
+    // and NVIDIA's llama-3.1/3.3 *instruct* models reject assistant messages
+    // with 2+ tool calls ("only supports single tool-calls at once"). The
+    // nemotron family handles tool loops; this list is the offline fallback
+    // when the live /v1/models endpoint is unreachable.
     models: [
       'nvidia/llama-3.3-nemotron-super-49b-v1',
-      'nvidia/llama-3.1-nemotron-ultra-253b-v1',
-      'nvidia/llama-3.1-nemotron-nano-8b-v1',
-      'meta/llama-3.1-405b-instruct',
-      'deepseek-ai/deepseek-r1',
+      'nvidia/llama-3.3-nemotron-super-49b-v1.5',
     ],
   },
   {

@@ -182,7 +182,7 @@ function main() {
   });
 }
 
-// Allow programmatic use: require('./aba/index.cjs').runBattle(argv)
+// Allow programmatic use: require('./aba/src/index.cjs').runBattle(argv)
 module.exports = { runBattle, main, VERSION };
 
 if (require.main === module) {
