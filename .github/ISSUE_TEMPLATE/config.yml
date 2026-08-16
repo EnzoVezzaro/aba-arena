@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions & ideas
+    url: https://github.com/EnzoVezzaro/aba-arena/discussions
+    about: Ask questions, share battle results, and suggest ideas for ABA.
+  - name: ACC framework (main repo)
+    url: https://github.com/EnzoVezzaro/agents-code-context/issues
+    about: ABA depends on the ACC framework — framework bugs belong there.
+  - name: Security vulnerabilities
+    url: https://github.com/EnzoVezzaro/aba-arena/security/advisories/new
+    about: Please report security issues privately via a GitHub Security Advisory — never in a public issue.

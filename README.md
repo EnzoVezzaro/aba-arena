@@ -178,6 +178,17 @@ countless libraries, frameworks, and standards you release for free.
 > **Gracias a toda la comunidad open source por los revolucionarios aportes
 > que están haciendo.** 🙌
 
+## Contributing
+
+ABA is open source and welcomes contributions of every size — bug reports,
+provider support, sandbox improvements, benchmark tasks, docs.
+
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** — development setup, project layout,
+  and the pull request process
+- **[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)** — how we treat each other
+- **[SECURITY.md](SECURITY.md)** — how to report vulnerabilities privately
+- **[CHANGELOG.md](CHANGELOG.md)** — release history
+
 ## Support
 
 ABA is free and open source. If it helps you benchmark and improve agent
