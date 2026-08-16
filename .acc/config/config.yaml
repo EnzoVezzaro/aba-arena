@@ -1,0 +1,10 @@
+# aba — ACC configuration
+#
+# Optional. When absent, ACC uses sensible defaults and every command
+# still works. See docs/02-repository-structure.md.
+schema_version: 1
+
+# Ignored from scans (filesystem walk, diagnostics, graph, build):
+# the built UI bundle is gitignored build output, not project source.
+ignore:
+  - ui/dist/
