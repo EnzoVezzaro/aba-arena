@@ -27,7 +27,7 @@ ABA is part of the ACC ecosystem:
 
 If ABA is useful to you, consider supporting the work:
 
-<iframe src="https://github.com/sponsors/EnzoVezzaro/button" title="Sponsor EnzoVezzaro" height="32" width="114" style="border: 0; border-radius: 6px;"></iframe>
+[![Sponsor](https://img.shields.io/github/sponsors/EnzoVezzaro?label=Sponsor&logo=GitHub)](https://github.com/sponsors/EnzoVezzaro)
 
 ## What it does
 
@@ -194,7 +194,7 @@ provider support, sandbox improvements, benchmark tasks, docs.
 ABA is free and open source. If it helps you benchmark and improve agent
 context, consider sponsoring:
 
-<iframe src="https://github.com/sponsors/EnzoVezzaro/card" title="Sponsor EnzoVezzaro" height="225" width="600" style="border: 0;"></iframe>
+[![Sponsor](https://img.shields.io/github/sponsors/EnzoVezzaro?label=Sponsor&logo=GitHub)](https://github.com/sponsors/EnzoVezzaro)
 
 ## License
 
