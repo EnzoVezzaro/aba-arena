@@ -151,6 +151,10 @@ export default function App() {
   const [repoError, setRepoError] = useState('');
   const [loadingRepo, setLoadingRepo] = useState(false);
   const [loadElapsed, setLoadElapsed] = useState(0); // seconds while loading
+  // ACC-sandbox setup progress — the server streams one step per phase
+  // (import → sandboxes → acc init/build/fill → harness) while loading.
+  const [setupSteps, setSetupSteps] = useState([]);
+  const [setupError, setSetupError] = useState('');
   const [backend, setBackend] = useState(null);
 
   const [panels, setPanels] = useState(INITIAL_PANELS);
@@ -270,6 +274,8 @@ export default function App() {
     if (!src) return;
     setLoadingRepo(true);
     setLoadElapsed(0);
+    setSetupSteps([]);
+    setSetupError('');
     setRepoError('');
     const t0 = Date.now();
     const timer = setInterval(() => setLoadElapsed(Math.round((Date.now() - t0) / 1000)), 1000);
@@ -279,7 +285,13 @@ export default function App() {
       // work. Anything else (URL or local path) loads normally.
       const matched = github.repos.find((r) => r.full === src);
       const opts = matched || githubRepo ? { type: 'github', token: github.token } : {};
-      const data = await loadRepo(src, opts);
+      const data = await loadRepo(src, opts, (evt) => {
+        // The ACC sandbox is set up once, at load — stream its phases live.
+        // Steps are keyed by label (graph + context share step number 6).
+        if (evt.type === 'step') {
+          setSetupSteps((prev) => [...prev.filter((s) => s.label !== evt.label), evt]);
+        }
+      });
       setRepo({
         ...data.repo,
         baseContext: data.baseContext,
@@ -288,6 +300,7 @@ export default function App() {
       });
     } catch (err) {
       setRepoError(err.message);
+      setSetupError(err.message);
     } finally {
       clearInterval(timer);
       setLoadingRepo(false);
@@ -835,6 +848,67 @@ export default function App() {
           </div>
         );
       })()}
+
+      {/* ==================== ACC SANDBOX SETUP OVERLAY =================== */}
+      {/* While a repo loads, only the ACC sandbox setup is shown: the server
+          runs acc init/build/fill once at load and streams each phase here.
+          When the environment is ready, the arena (both panels) appears. */}
+      {loadingRepo && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-6" role="status" aria-live="polite">
+          <div className="absolute inset-0 bg-black/80 backdrop-blur-md" />
+          <div className="panel-premium relative w-[min(92vw,560px)] overflow-hidden p-5 sm:p-6">
+            <div className="flex items-center gap-2.5">
+              <span className="grid size-10 shrink-0 place-items-center rounded-xl bg-[var(--color-accent)]/10 text-[var(--color-accent)]">
+                <Icon name="bolt" className="size-5" />
+              </span>
+              <div className="min-w-0 flex-1">
+                <h2 className="truncate text-[14px] font-medium text-[var(--color-ink)]">Setting up the ACC sandbox</h2>
+                <p className="mt-0.5 truncate font-mono text-[10px] text-[var(--color-ink-faint)]">{repoInput || '…'}</p>
+              </div>
+              <span className="shrink-0 font-mono text-[10px] tabular-nums text-[var(--color-ink-faint)]">{loadElapsed}s</span>
+            </div>
+            <p className="mt-3 text-[11px] leading-relaxed text-[var(--color-ink-faint)]">
+              The ACC sandbox is prepared once — <code className="font-mono">acc init</code>,{' '}
+              <code className="font-mono">acc build</code> and <code className="font-mono">acc fill</code> — before the battle
+              starts. The plain sandbox is copied in parallel; both panels appear as soon as this finishes.
+            </p>
+            <ul className="mt-4 space-y-2">
+              {setupSteps.length === 0 && (
+                <li className="flex items-center gap-2.5 text-[12px] text-[var(--color-ink-faint)]">
+                  <span className="size-3 shrink-0 animate-spin rounded-full border-2 border-[var(--color-line-hi)] border-t-[var(--color-accent)]" />
+                  connecting to the server…
+                </li>
+              )}
+              {setupSteps.map((s) => (
+                <li key={s.label} className="flex items-center gap-2.5 text-[12px]">
+                  <span className="grid size-4 shrink-0 place-items-center">
+                    {s.ok === null ? (
+                      <span className="size-3 animate-spin rounded-full border-2 border-[var(--color-line-hi)] border-t-[var(--color-accent)]" />
+                    ) : s.ok ? (
+                      <Icon name="check" className="size-3.5 text-emerald-400" />
+                    ) : (
+                      <Icon name="alert" className="size-3.5 text-red-400" />
+                    )}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate text-[var(--color-ink-dim)]">{s.label}</span>
+                  {s.detail && <span className="max-w-[45%] truncate text-[10px] text-[var(--color-ink-faint)]">{s.detail}</span>}
+                </li>
+              ))}
+            </ul>
+            {setupError && (
+              <p className="mt-3 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-[11px] text-red-400" role="alert">
+                {setupError}
+              </p>
+            )}
+            <div className="mt-4 h-1 overflow-hidden rounded-full bg-[var(--color-line)]">
+              <div
+                className="h-full rounded-full bg-[var(--color-accent)] transition-all duration-300"
+                style={{ width: `${Math.min(100, Math.round((Math.max(0, ...setupSteps.filter((s) => s.ok === true).map((s) => s.step)) / 7) * 100))}%` }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ============================ KEY MODAL ============================ */}
       <KeyModal open={keyModal} onClose={() => setKeyModal(false)} onSaved={() => refreshModels()} freebuffRunning={freebuffRunning} />

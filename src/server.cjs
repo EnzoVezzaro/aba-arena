@@ -283,9 +283,15 @@ function buildBaseContext(snapshotDir, info) {
   * Returns { context, steps } — steps is a list of { step, label, ok, detail }
   * shown in the UI so the benchmark is transparent about what ACC did.
   */
-async function buildAccContext(snapshotDir, info, baseContext) {
+async function buildAccContext(snapshotDir, info, baseContext, onProgress) {
   const parts = [baseContext];
   const steps = [];
+  // Report each pipeline step as it finishes — the arena streams these to the
+  // user as live progress while the ACC sandbox is being set up.
+  const emit = (s) => {
+    steps.push(s);
+    if (onProgress) onProgress(s);
+  };
 
   // Step 3 — acc init: scaffold ACC structure only if it isn't already there
   // (never rewrites an existing ACC repo — init is additive by contract).
@@ -293,14 +299,14 @@ async function buildAccContext(snapshotDir, info, baseContext) {
   const needsInit = !fs.existsSync(path.join(accDir, 'config', 'config.yaml'));
   if (needsInit) {
     const init = await runAcc(['init', '.'], snapshotDir);
-    steps.push({
+    emit({
       step: 3,
       label: 'acc init',
       ok: init.code === 0,
       detail: init.code === 0 ? 'scaffolded .acc/ control plane' : (init.err || init.out || '').trim().slice(0, 200),
     });
   } else {
-    steps.push({ step: 3, label: 'acc init', ok: true, detail: 'already initialized (.acc/ present)' });
+    emit({ step: 3, label: 'acc init', ok: true, detail: 'already initialized (.acc/ present)' });
   }
 
   // Step 4 — acc build: create the missing AGENTS.md contracts (+ initial
@@ -308,7 +314,7 @@ async function buildAccContext(snapshotDir, info, baseContext) {
   // project, not just a scaffold. Additive and idempotent by contract.
   const build = await runAcc(['build', '--yes'], snapshotDir);
   const builtContracts = (build.out.match(/^Created .*AGENTS\.md$/gm) || []).length;
-  steps.push({
+  emit({
     step: 4,
     label: 'acc build (contracts)',
     ok: build.code === 0,
@@ -329,7 +335,7 @@ async function buildAccContext(snapshotDir, info, baseContext) {
   } catch {
     // non-JSON output (e.g. error text) — leave the summary empty
   }
-  steps.push({
+  emit({
     step: 5,
     label: 'acc fill (fill directive)',
     ok: fill.code === 0,
@@ -342,14 +348,14 @@ async function buildAccContext(snapshotDir, info, baseContext) {
   // Step 6 — scan/prepare: derive the architecture graph, then the focused
   // agent context that ACC contributes to a coding agent.
   const graph = await runAcc(['graph', '--format', 'text'], snapshotDir);
-  steps.push({
+  emit({
     step: 6,
     label: 'acc graph (scan)',
     ok: graph.code === 0,
     detail: graph.code === 0 ? 'architecture graph derived' : (graph.err || graph.out || '').trim().slice(0, 200),
   });
   const scan = await runAcc(['context', '.', '--depth', '1', '--max-bytes', '16000'], snapshotDir);
-  steps.push({
+  emit({
     step: 6,
     label: 'acc context (prepare)',
     ok: scan.code === 0,
@@ -526,14 +532,21 @@ function serveStatic(req, res, pathname) {
   }
   if (fs.existsSync(file) && fs.statSync(file).isFile()) {
     const ext = path.extname(file);
-    res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
+    const headers = { 'Content-Type': MIME[ext] || 'application/octet-stream' };
+    // index.html must never be cached: it references the hashed bundle,
+    // so a stale HTML would load an old bundle (a "white screen" after a
+    // rebuild). Hashed assets (index-*.js/css) are content-addressed and
+    // safe to cache forever.
+    if (ext === '.html') headers['Cache-Control'] = 'no-cache, no-store, must-revalidate';
+    else headers['Cache-Control'] = 'public, max-age=31536000, immutable';
+    res.writeHead(200, headers);
     fs.createReadStream(file).pipe(res);
     return;
   }
   // SPA fallback
   const index = path.join(UI_DIST, 'index.html');
   if (fs.existsSync(index)) {
-    res.writeHead(200, { 'Content-Type': MIME['.html'] });
+    res.writeHead(200, { 'Content-Type': MIME['.html'], 'Cache-Control': 'no-cache, no-store, must-revalidate' });
     fs.createReadStream(index).pipe(res);
     return;
   }
@@ -717,13 +730,27 @@ async function handleApi(req, res, url) {
   }
 
   if (method === 'POST' && url.pathname === '/api/repo') {
-    try {
-      const body = await readBody(req);
-      const source = (body.source || '').trim();
-      if (!source) {
-        sendJson(res, 400, { error: 'source is required (local path or GitHub URL)' });
-        return;
+    const body = await readBody(req).catch(() => ({}));
+    const source = (body.source || '').trim();
+    if (!source) {
+      sendJson(res, 400, { error: 'source is required (local path or GitHub URL)' });
+      return;
+    }
+    // Repo setup runs in phases (import → sandboxes → ACC pipeline → harness)
+    // and can take ~40s on a fresh clone. Stream each phase as NDJSON so the
+    // arena can show live setup progress instead of a silent spinner. The
+    // final `done` line carries the exact payload the client used to get as a
+    // single JSON response.
+    res.writeHead(200, { 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'no-cache' });
+    const progress = (s) => {
+      try {
+        res.write(JSON.stringify({ type: 'step', ...s }) + '\n');
+      } catch {
+        // client disconnected — keep setting up for the next request
       }
+    };
+    try {
+      progress({ step: 1, label: 'Importing repository', ok: null });
       const isUrl = /^https?:\/\//i.test(source);
       // The client can pin the type (e.g. a repo picked from the GitHub
       // autocomplete is always 'github', even in owner/repo shorthand).
@@ -738,6 +765,12 @@ async function handleApi(req, res, url) {
       });
       const workDir = importResult.snapshotDir || importResult.originalDir;
       const info = importResult.snapshotInfo;
+      progress({
+        step: 1,
+        label: 'Importing repository',
+        ok: true,
+        detail: info.commitSha ? `revision ${String(info.commitSha).slice(0, 10)}` : '',
+      });
 
       // Drop sandboxes from battles that were interrupted (back/closed tab)
       // before this new one starts.
@@ -756,11 +789,12 @@ async function handleApi(req, res, url) {
       // and the agents never edit them. The source snapshot keeps everything.
       copyDirectory(workDir, accDir, true);
       copyDirectory(workDir, plainDir, true);
+      progress({ step: 2, label: 'Creating isolated sandboxes (ACC + plain)', ok: true, detail: 'two isolated copies' });
 
       // ACC onboarding pipeline runs on the ACC sandbox only — the plain
       // sandbox stays untouched so the benchmark compares framework vs no.
       const baseContext = buildBaseContext(plainDir, info);
-      const accResult = await buildAccContext(accDir, info, baseContext);
+      const accResult = await buildAccContext(accDir, info, baseContext, progress);
 
       // Install the agent harness INSIDE both sandboxes so the battle runs
       // through it (plan/act + "start the project" verification) instead of
@@ -791,6 +825,16 @@ async function handleApi(req, res, url) {
       } catch (err) {
         harness.error = err.message;
       }
+      progress({
+        step: 7,
+        label: 'Installing agent harness in both sandboxes',
+        ok: harness.installed,
+        detail: harness.selfCheck
+          ? harness.selfCheck.ok
+            ? 'self-check passed'
+            : `self-check failed: ${String(harness.selfCheck.error || '').slice(0, 120)}`
+          : '',
+      });
 
       currentRepo = {
         battleId,
@@ -802,16 +846,25 @@ async function handleApi(req, res, url) {
         baseContext,
         accContext: accResult.context,
       };
-      sendJson(res, 200, {
-        repo: { name: currentRepo.name, source, sha: info.commitSha, battleId },
-        baseContext,
-        accContext: accResult.context,
-        accPipeline: accResult.steps,
-        harness,
-      });
+      res.write(
+        JSON.stringify({
+          type: 'done',
+          repo: { name: currentRepo.name, source, sha: info.commitSha, battleId },
+          baseContext,
+          accContext: accResult.context,
+          accPipeline: accResult.steps,
+          harness,
+        }) + '\n'
+      );
+      res.end();
       return;
     } catch (err) {
-      sendJson(res, 400, { error: err.message });
+      try {
+        res.write(JSON.stringify({ type: 'error', message: err.message }) + '\n');
+        res.end();
+      } catch {
+        // client disconnected
+      }
       return;
     }
   }

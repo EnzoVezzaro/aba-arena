@@ -12,11 +12,50 @@ export function health() {
   return request('/api/health');
 }
 
-export function loadRepo(source, opts = {}) {
+/**
+ * Load a repository into the arena. The server streams setup progress as
+ * NDJSON (one line per ACC-sandbox phase) and finishes with a `done` event
+ * carrying the repo + context payload. `onEvent` receives each progress
+ * event ({type:'step', step, label, ok, detail}) for live UI.
+ */
+export async function loadRepo(source, opts = {}, onEvent) {
   const body = { source };
   if (opts.token) body.token = opts.token; // used for private GitHub clones
   if (opts.type) body.type = opts.type; // e.g. 'github' when picked from the autocomplete
-  return request('/api/repo', { method: 'POST', body: JSON.stringify(body) });
+  const res = await fetch('/api/repo', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `${res.status} ${res.statusText}`);
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  let lastError = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let idx;
+    while ((idx = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, idx).trim();
+      buf = buf.slice(idx + 1);
+      if (!line) continue;
+      let evt;
+      try {
+        evt = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (evt.type === 'done') return evt;
+      if (evt.type === 'error') lastError = evt.message || lastError;
+      onEvent?.(evt);
+    }
+  }
+  throw new Error(lastError || 'repo setup ended without finishing');
 }
 
 export function saveReport(report) {

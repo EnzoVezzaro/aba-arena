@@ -63,7 +63,7 @@ server.cjs     HTTP API: repo import, ACC pipeline, harness install
                model-list proxy, GitHub OAuth, Freebuff status
 ```
 
-Data flow: browser → `/api/repo` → snapshots → two sandbox copies → ACC pipeline on the `acc` copy → harness installed in both → `/api/agent/run` spawns the harness in the requested panel's sandbox with the panel's provider/model/key → NDJSON events stream back to the browser's sandbox-terminal Answer panel.
+Data flow: browser → `/api/repo` (NDJSON: streams one line per setup phase) → snapshots → two sandbox copies → ACC pipeline on the `acc` copy (acc init/build/fill once, at load — the arena shows this as live setup progress) → harness installed in both → `/api/agent/run` spawns the harness in the requested panel's sandbox with the panel's provider/model/key → NDJSON events stream back to the browser's sandbox-terminal Answer panel. The ACC sandbox is configured exactly once, during repo load — the battle itself runs the user's tasks on the two ready sandboxes directly.
 
 ## Workflows
 

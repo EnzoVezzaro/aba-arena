@@ -16,8 +16,8 @@
     "LICENSE"
   ],
   "scripts": {
-    "start": "node index.cjs",
-    "ui": "node index.cjs",
+    "start": "node src/index.cjs",
+    "ui": "node src/index.cjs",
     "build:ui": "npm --prefix ui install && npm --prefix ui run build",
     "dev:ui": "npm --prefix ui run dev",
     "prepare": "node -e \"if (!require('fs').existsSync('ui/dist/index.html')) { const { execSync } = require('child_process'); execSync('npm --prefix ui install --no-audit --no-fund', { stdio: 'inherit' }); execSync('npm --prefix ui run build', { stdio: 'inherit' }); }\""

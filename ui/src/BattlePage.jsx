@@ -68,13 +68,17 @@ export default function BattlePage({ onBack }) {
   // Per-card view overrides — each sandbox's Code/Answer buttons only affect
   // that card. Key: `${taskIndex}:${panelId}` → 'answer' | 'code'.
   const [cardViews, setCardViews] = useState({});
-  // Blind mode is ON by default: the two panels are shown under shuffled
-  // aliases (Panel A / Panel B) so the battle can be judged without knowing
-  // which side runs the ACC framework. Reveal to disclose.
+  // Blind mode is OFF by default: the battle shows real panel names and full
+  // features (per-card Code view, sandbox file browsers). Opt in via the
+  // toolbar to shuffle the panels under aliases for judging; revealing
+  // discloses which side runs the ACC framework.
   const [blind, setBlind] = useState(() => {
     const pending = loadPendingBattle();
     const ids = (pending?.panels || []).map((p) => p.id);
-    return { enabled: true, order: shuffle(ids.length ? ids : ['acc', 'plain']), revealed: false };
+    // Off by default: the battle shows real panel names and full features
+    // (per-card Code view, sandbox file browsers). Blind mode is opt-in via
+    // the toolbar — it hides identity for judging, and with it the Code view.
+    return { enabled: false, order: shuffle(ids.length ? ids : ['acc', 'plain']), revealed: false };
   });
   const [savedReport, setSavedReport] = useState('');
   const [explorerPanel, setExplorerPanel] = useState(null); // null | panel object
@@ -137,6 +141,8 @@ export default function BattlePage({ onBack }) {
           system: systemPrompt(battleRef.current),
           // Act tasks verify the project still runs (the harness asks the
           // agent to start it); plan tasks are plans only — nothing to run.
+          // The ACC sandbox is configured once at repo load (acc init/build/
+          // fill), so no task needs to set the framework up again.
           verify: mode === 'act',
           maxSteps: 12,
         },
@@ -165,6 +171,11 @@ export default function BattlePage({ onBack }) {
               };
             } else if (evt.type === 'cmd' || evt.type === 'out' || evt.type === 'reasoning') {
               term.push({ kind: evt.type, text: evt.text || '' });
+              // Any activity counts as alive — a reasoning model "thinks" for
+              // long stretches with no answer text, and tool calls run while
+              // the model is quiet. Only a truly dead provider should trip
+              // the idle watchdog.
+              lastChunkAt = Date.now();
               if (onLive) onLive({ term: [...term] });
             }
           },
@@ -313,6 +324,8 @@ export default function BattlePage({ onBack }) {
       status: 'running',
     });
     const panelInit = Object.fromEntries(panels.map((p) => [p.id, { status: 'pending' }]));
+    // The ACC sandbox was configured once at repo load (acc init/build/fill),
+    // so the battle runs the user's tasks on both ready sandboxes directly.
     // Track the final results locally as well — the React state updates are
     // batched, so reading state right after the loop would miss the last
     // task's finished panels when persisting history.
@@ -376,7 +389,9 @@ export default function BattlePage({ onBack }) {
 
   function persistBattle(final) {
     if (!final.length || !repo) return;
-    const done = final.filter((r) => r.panels.acc?.status === 'done' || r.panels.plain?.status === 'done');
+    const comparable = final;
+    if (!comparable.length) return;
+    const done = comparable.filter((r) => r.panels.acc?.status === 'done' || r.panels.plain?.status === 'done');
     if (!done.length) return;
     const accWins = done.filter((r) => {
       const a = r.panels.acc;
@@ -392,9 +407,9 @@ export default function BattlePage({ onBack }) {
       ts: Date.now(),
       repoName: repo.name,
       repoSource: repo.source,
-      taskCount: final.length,
+      taskCount: comparable.length,
       accWins,
-      verdict: accWins > final.length / 2 ? 'ACC ahead' : accWins < final.length / 2 ? 'no-ACC ahead' : 'tie',
+      verdict: accWins > comparable.length / 2 ? 'ACC ahead' : accWins < comparable.length / 2 ? 'no-ACC ahead' : 'tie',
       status: 'done',
     });
   }
@@ -405,16 +420,18 @@ export default function BattlePage({ onBack }) {
     if (results.length === 0) return null;
     // Count every task; panels that errored are failures (not dropped), so a
     // blocked panel shows as a loss instead of vanishing from the analysis.
-    const total = results.length;
-    const accDone = results.filter((r) => r.panels.acc?.status === 'done');
-    const plainDone = results.filter((r) => r.panels.plain?.status === 'done');
+    const comparable = results;
+    if (comparable.length === 0) return null;
+    const total = comparable.length;
+    const accDone = comparable.filter((r) => r.panels.acc?.status === 'done');
+    const plainDone = comparable.filter((r) => r.panels.plain?.status === 'done');
     const acc = accDone.map((r) => r.panels.acc);
     const plain = plainDone.map((r) => r.panels.plain);
     const avg = (arr, f) => {
       const vals = arr.map(f).filter((v) => v != null && Number.isFinite(v));
       return vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : null;
     };
-    const accWins = results.filter((r) => {
+    const accWins = comparable.filter((r) => {
       const a = r.panels.acc;
       const p = r.panels.plain;
       if (!a || !p) return false;
@@ -470,7 +487,11 @@ export default function BattlePage({ onBack }) {
             battleRef.current = { ...battle, repo: fresh };
           });
         })
-        .finally(() => startBattle());
+        .finally(() => startBattle())
+        // The re-load can fail (server restarted, source unreachable) — the
+        // panels will surface that as per-panel errors. Never let it become
+        // an unhandled rejection that blanks the whole page.
+        .catch(() => {});
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -689,7 +710,7 @@ export default function BattlePage({ onBack }) {
                     {/* task heading spans the full row */}
                     <div className="col-span-full mt-2 flex items-baseline gap-2.5 first:mt-0">
                       <span className="font-pixel text-[11px] uppercase tracking-[0.14em] text-[var(--color-ink-faint)]">
-                        task {i + 1}
+                        {`task ${i + 1}`}
                       </span>
                       <span className="min-w-0 flex-1 truncate text-[13px] text-[var(--color-ink)]">{r.task.title}</span>
                       {winners.size > 0 && (

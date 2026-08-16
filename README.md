@@ -1,5 +1,7 @@
 # ABA — ACC Battle Arena
 
+🚧 **Work in Progress**
+
 **ABA** is a standalone benchmark application that answers one question:
 
 > Does the **ACC framework** help an AI coding agent work with a repository
@@ -169,6 +171,16 @@ where it is due:
   Agent Skills (https://agentskills.io/), and MCP
   (https://modelcontextprotocol.io/).
 
+<!-- tags: midudev https://github.com/midudev, michaelmov https://github.com/michaelmov/mini-coding-agent, Quorinex https://github.com/Quorinex/Freebuff2API, CodebuffAI https://github.com/CodebuffAI/freebuff -->
+
+### Special thanks to Freebuff 💜
+
+I built most of ABA with [Freebuff](https://freebuff.com/?ref=ref-0f42f217-e7d8-472f-b137-ca83dacb992b) ([GitHub](https://github.com/CodebuffAI/freebuff)). It’s free, no API keys, no subscription — just models you can actually use. For a solo developer in the Dominican Republic, that made a real difference. The design, the tests, even the UI iterations were shaped with Freebuff running locally.
+
+> A note to the Freebuff team: thank you for making this possible. From the Dominican Republic: we need more models. Keep them coming. 🌎💜
+
+<!-- tags: Freebuff https://github.com/CodebuffAI/freebuff -->
+
 ### To the open source community
 
 Thank you — to every maintainer, contributor, and creator pushing this
@@ -199,3 +211,8 @@ context, consider sponsoring:
 ## License
 
 [MIT](LICENSE)
+
+
+🚧 **Work in Progress**
+
+> [ ] ⚠️ **Current issue:** Render is showing a white screen — needs a fix.

@@ -36,7 +36,11 @@
  */
 
 const { tool, streamText } = require('ai');
-const { createOpenAI } = require('@ai-sdk/openai');
+// Use the OPENAI-COMPATIBLE adapter (not @ai-sdk/openai) for custom base
+// URLs: the openai provider drops `reasoning_content` deltas (it buffers the
+// whole response into one final text-delta), so reasoning models look dead
+// while they think. The compatible adapter streams reasoning live.
+const { createOpenAICompatible } = require('@ai-sdk/openai-compatible');
 const { createAnthropic } = require('@ai-sdk/anthropic');
 const { z } = require('zod');
 const { spawn } = require('node:child_process');
@@ -53,6 +57,44 @@ function emit(obj) {
 
 function fmtErr(e) {
   return String((e && e.message) || e || 'unknown error');
+}
+
+// Consume the model's FULL stream (text + reasoning) and emit terminal
+// events for both. Reasoning models (e.g. NVIDIA's muse-glimmer) stream long
+// silent `reasoning_content` blocks before any content — if the harness only
+// reads textStream the battle page sees nothing during the thinking phase
+// and the client's idle watchdog aborts a perfectly healthy run. Surfacing
+// the reasoning keeps the terminal alive AND shows the agent thinking live.
+// Reasoning deltas are batched into readable chunks (~60+ chars, ~350ms) so
+// the terminal gets a progressive stream of "· …" lines, not hundreds of
+// single-character events.
+async function streamFull(result) {
+  let output = '';
+  let reasoning = '';
+  let lastReasoningAt = 0;
+  for await (const part of result.fullStream) {
+    if (part.type === 'text-delta') {
+      if (reasoning) {
+        emit({ type: 'reasoning', text: reasoning });
+        reasoning = '';
+      }
+      const t = part.textDelta || '';
+      output += t;
+      emit({ type: 'delta', text: t });
+    } else if (part.type === 'reasoning') {
+      const t = part.textDelta || '';
+      if (!t) continue;
+      reasoning += t;
+      const now = Date.now();
+      if (reasoning.length >= 60 && now - lastReasoningAt >= 350) {
+        emit({ type: 'reasoning', text: reasoning });
+        reasoning = '';
+        lastReasoningAt = now;
+      }
+    }
+  }
+  if (reasoning) emit({ type: 'reasoning', text: reasoning });
+  return output;
 }
 
 function summarizeArgs(args) {
@@ -253,21 +295,20 @@ function createModel(kind, baseURL, apiKey) {
     const provider = createAnthropic({ apiKey, baseURL });
     return provider.languageModel(process.env.ABA_MODEL);
   }
-  // OpenAI-compatible providers go through the NATIVE OpenAI adapter with
-  // compatibility:'compatible' (the SDK's recommended mode for custom base
-  // URLs). parallelToolCalls:false sends parallel_tool_calls:false so models
-  // that only support ONE tool call per response (e.g. NVIDIA's
-  // llama-3.1-8b) work instead of erroring with "only supports single
-  // tool-calls at once".
-  const provider = createOpenAI({
+  // OpenAI-compatible providers go through @ai-sdk/openai-compatible — the
+  // adapter that keeps streaming `reasoning_content` live (the openai
+  // provider swallows it). parallel_tool_calls:false is passed through
+  // providerOptions (the adapter spreads the provider's options into the
+  // request body) so models that only support ONE tool call per response
+  // (e.g. NVIDIA's llama-3.1-8b) work instead of erroring with "only
+  // supports single tool-calls at once".
+  const provider = createOpenAICompatible({
     name: 'aba-harness',
     baseURL: baseURL || 'https://api.openai.com/v1',
     apiKey: apiKey || 'none',
     compatibility: 'compatible',
-    parallelToolCalls: false,
   });
-  // The AI SDK v4 provider is a callable function: provider(modelId).
-  return provider(process.env.ABA_MODEL);
+  return provider.languageModel(process.env.ABA_MODEL);
 }
 
 async function runAgent() {
@@ -308,15 +349,14 @@ async function runAgent() {
       maxSteps,
       maxTokens: Number(process.env.ABA_MAX_TOKENS || 4000),
       maxRetries: 0,
+      providerOptions: {
+        'aba-harness': { parallel_tool_calls: false },
+      },
       onStepFinish: onStep,
     });
-    const { textStream } = result;
-    if (process.env.ABA_TRACE === '1') console.error('[harness] iterating textStream');
-    for await (const chunk of textStream) {
-      output += chunk;
-      emit({ type: 'delta', text: chunk });
-    }
-    if (process.env.ABA_TRACE === '1') console.error('[harness] textStream done, output len=' + output.length);
+    if (process.env.ABA_TRACE === '1') console.error('[harness] iterating fullStream');
+    output = await streamFull(result);
+    if (process.env.ABA_TRACE === '1') console.error('[harness] stream done, output len=' + output.length);
   } catch (err) {
     emit({ type: 'error', message: fmtErr(err) });
     process.exit(1);
@@ -359,12 +399,12 @@ async function runAgent() {
         maxSteps: 5,
         maxTokens: Number(process.env.ABA_MAX_TOKENS || 4000),
         maxRetries: 0,
+        providerOptions: {
+          'aba-harness': { parallel_tool_calls: false },
+        },
         onStepFinish: onStep,
       });
-      const { textStream: vText } = vResult;
-      for await (const chunk of vText) {
-        emit({ type: 'delta', text: chunk });
-      }
+      await streamFull(vResult);
       const r = record.result;
       verified = !!r && (r.exitCode === 0 || r.exitCode == null);
       verifyInfo = {
