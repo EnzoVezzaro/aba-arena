@@ -61,7 +61,7 @@ function parseGithubRepo(input) {
  * The original project is never modified.
  */
 async function importProject(spec) {
-  const { type, pathOrUrl, revision, sandboxDir } = spec;
+  const { type, pathOrUrl, revision, sandboxDir, token } = spec;
   let originalDir;
   let snapshotDir;
 
@@ -81,7 +81,7 @@ async function importProject(spec) {
       
       case 'github': {
         const repoInfo = parseGithubRepo(pathOrUrl);
-        originalDir = await cloneGithubRepo(repoInfo.owner, repoInfo.repo, sandboxDir);
+        originalDir = await cloneGithubRepo(repoInfo.owner, repoInfo.repo, sandboxDir, token);
         break;
       }
       
@@ -159,13 +159,24 @@ async function createLocalSnapshot(projectDir, sandboxDir) {
  * benchmark only needs the current revision — cloning full history makes
  * big repos (media, docs) take minutes and fills the sandbox.
  */
-async function cloneGithubRepo(owner, repo, sandboxDir) {
-  const repoUrl = 'https://github.com/' + owner + '/' + repo + '.git';
+async function cloneGithubRepo(owner, repo, sandboxDir, token) {
+  // A user token lets private repos clone too; it is stripped from the clone's
+  // remote config right after, so it never persists on disk.
+  const auth = token ? 'x-access-token:' + token + '@' : '';
+  const repoUrl = 'https://' + auth + 'github.com/' + owner + '/' + repo + '.git';
+  const cleanUrl = 'https://github.com/' + owner + '/' + repo + '.git';
   const targetDir = join(sandboxDir, 'repos', owner + '-' + repo);
   mkdirSync(dirname(targetDir), { recursive: true });
   rmSync(targetDir, { recursive: true, force: true });
 
   runGit('clone --depth 1 ' + repoUrl + ' ' + targetDir);
+  if (token) {
+    try {
+      runGit('remote set-url origin ' + cleanUrl, targetDir);
+    } catch {
+      // best-effort — never let a leftover token block the import
+    }
+  }
   return targetDir;
 }
 

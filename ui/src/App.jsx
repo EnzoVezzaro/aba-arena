@@ -1,7 +1,7 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { PROVIDERS, getProvider, loadKeys, fetchProviderModels } from './providers.js';
+import React, { useEffect, useRef, useState } from 'react';
+import { PROVIDERS, getProvider, loadKeys, fetchProviderModels, PUBLIC_MODELS_PROVIDERS } from './providers.js';
 import { DEFAULT_TASKS } from './tasks.js';
-import { health, loadRepo, deleteBattle, deleteAllBattles } from './api.js';
+import { health, loadRepo, deleteBattle, deleteAllBattles, fsList } from './api.js';
 import IconSprite from './icons.jsx';
 import {
   Icon,
@@ -9,8 +9,8 @@ import {
   KeyModal,
   HistoryDrawer,
   SettingsModal,
+  useOverlay,
   DEFAULT_SYSTEM,
-  TASK_EXAMPLES,
   HISTORY_KEY,
   PENDING_BATTLE_KEY,
   INITIAL_PANELS,
@@ -23,47 +23,117 @@ const navigateToBattle = () => {
   window.location.href = '/battle';
 };
 
-/* GitHub repo suggestions under the repository box — shown when the user's
-   GitHub account is connected in Settings. Filter as you type. */
-function RepoSuggestions({ repos, filter, onFilter, onPick }) {
-  const [open, setOpen] = useState(true);
-  const list = filter
-    ? repos.filter((r) => r.full.toLowerCase().includes(filter.toLowerCase()) || (r.language || '').toLowerCase().includes(filter.toLowerCase()))
-    : repos;
+/* Repository autocomplete — a free-text input (local path or URL) with the
+   connected GitHub account's repos as searchable suggestions, keyboard
+   navigable like the provider/model selects. */
+function RepoAutocomplete({ value, onChange, onLoad, repos, busy, loadingLabel, placeholder, onFindFolder }) {
+  const [open, setOpen] = useState(false);
+  const [highlight, setHighlight] = useState(0);
+  const rootRef = useRef(null);
+  const q = value.toLowerCase();
+  const list = repos.filter(
+    (r) => !q || r.full.toLowerCase().includes(q) || (r.language || '').toLowerCase().includes(q)
+  );
+
+  useEffect(() => {
+    const onOut = (e) => {
+      if (rootRef.current && !rootRef.current.contains(e.target)) setOpen(false);
+    };
+    document.addEventListener('mousedown', onOut);
+    return () => document.removeEventListener('mousedown', onOut);
+  }, []);
+
+  function onKeyDown(e) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (open && list.length) {
+        // Pick fills the input only — the user presses Load to load it.
+        onChange(list[Math.min(highlight, list.length - 1)].full);
+        setOpen(false);
+      } else {
+        onLoad();
+      }
+    } else if (e.key === 'ArrowDown' && open && list.length) {
+      e.preventDefault();
+      setHighlight((h) => (h + 1) % list.length);
+    } else if (e.key === 'ArrowUp' && open && list.length) {
+      e.preventDefault();
+      setHighlight((h) => (h - 1 + list.length) % list.length);
+    } else if (e.key === 'Escape') {
+      setOpen(false);
+    }
+  }
+
   return (
-    <div className="mt-2 overflow-hidden rounded-xl border border-[var(--color-line)] bg-[var(--color-surface)]">
-      <div className="flex items-center gap-2 border-b border-[var(--color-line)] px-3 py-2">
-        <Icon name="link" className="size-3.5 text-[var(--color-ink-faint)]" />
+    <div ref={rootRef} className="relative">
+      <div className="prompt-shell relative mt-3">
         <input
-          value={filter}
+          id="repo-input"
+          type="text"
+          placeholder={placeholder}
+          value={value}
           onChange={(e) => {
-            onFilter(e.target.value);
+            onChange(e.target.value);
             setOpen(true);
+            setHighlight(0);
           }}
-          placeholder={`Filter ${repos.length} GitHub repos…`}
+          onFocus={() => {
+            setOpen(true);
+            setHighlight(0);
+          }}
+          onKeyDown={onKeyDown}
           spellCheck="false"
-          className="min-w-0 flex-1 bg-transparent text-[12px] text-[var(--color-ink)] outline-none placeholder:text-[var(--color-ink-faint)]"
+          className="no-scrollbar block w-full bg-transparent px-4 py-3.5 text-[13px] leading-relaxed text-[var(--color-ink)] outline-none placeholder:text-[var(--color-ink-faint)] sm:text-[14px]"
         />
-        <button onClick={() => setOpen((v) => !v)} aria-label="Toggle repo list" className="text-[var(--color-ink-faint)] hover:text-[var(--color-ink)]">
-          <Icon name="chevron" className={`size-3.5 transition-transform ${open ? 'rotate-180' : ''}`} />
-        </button>
+        <div className="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-1.5">
+          <button
+            type="button"
+            onClick={onFindFolder}
+            title="Load a project from a folder on this machine"
+            aria-label="Find folder"
+            className="grid size-8 place-items-center rounded-lg bg-[var(--color-panel-hi)] text-[var(--color-ink-dim)] transition-colors hover:bg-[var(--color-line-hi)] hover:text-[var(--color-ink)]"
+          >
+            <Icon name="folder" className="size-4" />
+          </button>
+          <button
+            type="button"
+            onClick={() => onLoad()}
+            disabled={busy}
+            className="flex h-8 items-center rounded-lg bg-[var(--color-panel-hi)] px-2.5 text-[11px] font-medium text-[var(--color-ink-dim)] transition-colors hover:bg-[var(--color-line-hi)] hover:text-[var(--color-ink)] disabled:opacity-50"
+          >
+            {busy ? loadingLabel : 'Load'}
+          </button>
+        </div>
       </div>
-      {open && (
-        <ul className="no-scrollbar max-h-48 overflow-y-auto">
-          {list.length === 0 && <li className="px-3 py-2 text-[11px] text-[var(--color-ink-faint)]">no repos match</li>}
-          {list.map((r) => (
-            <li key={r.full}>
-              <button
-                onClick={() => onPick(r.full)}
-                className="flex w-full items-center gap-2 px-3 py-1.5 text-left transition-colors hover:bg-[var(--color-panel-hi)]"
-              >
-                <Icon name="folder" className="size-3.5 shrink-0 text-[var(--color-ink-faint)]" />
-                <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--color-ink-dim)]">{r.full}</span>
-                {r.language && <span className="shrink-0 rounded-md bg-[var(--color-panel-hi)] px-1.5 py-0.5 text-[9px] uppercase text-[var(--color-ink-faint)]">{r.language}</span>}
-              </button>
-            </li>
-          ))}
-        </ul>
+      {open && list.length > 0 && (
+        <div className="absolute left-0 right-0 top-full z-30 mt-1 overflow-hidden rounded-lg border border-[var(--color-line-hi)] bg-[var(--color-panel)] shadow-xl">
+          <ul className="no-scrollbar max-h-56 overflow-y-auto py-1">
+            {list.map((r, i) => (
+              <li key={r.full}>
+                <button
+                  type="button"
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    onChange(r.full);
+                    setOpen(false);
+                  }}
+                  onMouseEnter={() => setHighlight(i)}
+                  className={`flex w-full items-center gap-2 px-3 py-1.5 text-left transition-colors ${
+                    i === highlight ? 'bg-[var(--color-panel-hi)] text-[var(--color-ink)]' : 'text-[var(--color-ink-dim)]'
+                  }`}
+                >
+                  <Icon name="folder" className="size-3.5 shrink-0 text-[var(--color-ink-faint)]" />
+                  <span className="min-w-0 flex-1 truncate text-[12px]">{r.full}</span>
+                  {r.language && (
+                    <span className="shrink-0 rounded-md bg-[var(--color-panel-hi)] px-1.5 py-0.5 text-[9px] uppercase text-[var(--color-ink-faint)]">
+                      {r.language}
+                    </span>
+                  )}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
     </div>
   );
@@ -91,12 +161,22 @@ export default function App() {
 
   const [history, setHistory] = useState([]);
   const [keyModal, setKeyModal] = useState(false);
+  // Optional local Freebuff proxy (aba/freebuff) — the Freebuff provider only
+  // appears in the pickers while the proxy is actually running on :8080.
+  const [freebuffRunning, setFreebuffRunning] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [github, setGithub] = useState(loadGithub);
-  const [ghFilter, setGhFilter] = useState('');
   const [liveModels, setLiveModels] = useState({}); // providerId -> model ids (fetched with key)
   const [modelsLoading, setModelsLoading] = useState({}); // providerId -> true while fetching
+
+  // Folder picker — browse the machine running ABA and load a local project.
+  const [folderOpen, setFolderOpen] = useState(false);
+  const [folderPath, setFolderPath] = useState('');
+  const [folderParent, setFolderParent] = useState('');
+  const [folderDirs, setFolderDirs] = useState([]);
+  const [folderBusy, setFolderBusy] = useState(false);
+  const [folderError, setFolderError] = useState('');
 
   /* Keep panels on providers that actually have a key; pick a live model. */
   useEffect(() => {
@@ -122,7 +202,10 @@ export default function App() {
      (isbetter.ai pattern). Called on mount and after keys are saved. */
   async function refreshModels() {
     const keys = loadKeys();
-    const targets = PROVIDERS.filter((p) => !p.needsKey || keys[p.id]);
+    // Providers with a key, local providers, and providers whose model list
+    // endpoint is public (NVIDIA, OpenRouter) — fetch live models for all of
+    // them so the dropdown shows the full list even before a key is saved.
+    const targets = PROVIDERS.filter((p) => !p.needsKey || keys[p.id] || PUBLIC_MODELS_PROVIDERS.has(p.id));
     setModelsLoading(Object.fromEntries(targets.map((p) => [p.id, true])));
     await Promise.all(
       targets.map(async (p) => {
@@ -142,6 +225,29 @@ export default function App() {
     setHistory(loadHistory());
     health().then(setBackend).catch((e) => setBackend({ error: e.message }));
     refreshModels();
+    // Poll the local Freebuff proxy (cheap localhost check) so the provider
+    // appears in the pickers the moment the proxy comes up (and disappears
+    // when it stops). Never auto-starts it — that's the user's call.
+    let lastFreebuff = false;
+    const poll = async () => {
+      try {
+        const res = await fetch('/api/freebuff/status');
+        const j = await res.json();
+        if (j.running !== lastFreebuff) {
+          lastFreebuff = !!j.running;
+          setFreebuffRunning(!!j.running);
+          if (j.running) refreshModels();
+        }
+      } catch {
+        if (lastFreebuff) {
+          lastFreebuff = false;
+          setFreebuffRunning(false);
+        }
+      }
+    };
+    poll();
+    const t = setInterval(poll, 10000);
+    return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -159,16 +265,21 @@ export default function App() {
 
   /* Repo ---------------------------------------------------------------- */
 
-  async function handleLoadRepo() {
-    const source = repoInput.trim();
-    if (!source) return;
+  async function handleLoadRepo(source, githubRepo) {
+    const src = (typeof source === 'string' ? source : repoInput).trim();
+    if (!src) return;
     setLoadingRepo(true);
     setLoadElapsed(0);
     setRepoError('');
     const t0 = Date.now();
     const timer = setInterval(() => setLoadElapsed(Math.round((Date.now() - t0) / 1000)), 1000);
     try {
-      const data = await loadRepo(source);
+      // When the text matches one of the connected account's repos (typed or
+      // picked), clone it as GitHub with the account token so private repos
+      // work. Anything else (URL or local path) loads normally.
+      const matched = github.repos.find((r) => r.full === src);
+      const opts = matched || githubRepo ? { type: 'github', token: github.token } : {};
+      const data = await loadRepo(src, opts);
       setRepo({
         ...data.repo,
         baseContext: data.baseContext,
@@ -183,21 +294,64 @@ export default function App() {
     }
   }
 
+  /* Find folder ----------------------------------------------------------- */
+
+  async function navigateFolder(path) {
+    setFolderBusy(true);
+    setFolderError('');
+    try {
+      const r = await fsList(path);
+      setFolderPath(r.path);
+      setFolderParent(r.parent || '');
+      setFolderDirs(r.dirs || []);
+    } catch (err) {
+      setFolderError(err.message);
+    } finally {
+      setFolderBusy(false);
+    }
+  }
+
+  function openFolderBrowser() {
+    setFolderOpen(true);
+    navigateFolder('');
+  }
+
+  function loadFromFolder() {
+    if (!folderPath) return;
+    setFolderOpen(false);
+    setRepoInput(folderPath);
+    handleLoadRepo(folderPath);
+  }
+
   /* Tasks --------------------------------------------------------------- */
 
   function addTask() {
     const text = taskDraft.trim();
     if (!text) return;
-    setTasks((prev) => [...prev, { title: text.slice(0, 60), prompt: text, hints: [], minChars: 80 }]);
+    // Custom tasks default to 'act' — the agent edits the code, then the
+    // harness starts the project to verify it still runs.
+    setTasks((prev) => [...prev, { title: text.slice(0, 60), prompt: text, hints: [], minChars: 80, mode: 'act' }]);
     setTaskDraft('');
+  }
+
+  function setTaskMode(i, mode) {
+    setTasks((prev) => prev.map((t, idx) => (idx === i ? { ...t, mode } : t)));
   }
 
   function removeTask(i) {
     setTasks((prev) => prev.filter((_, idx) => idx !== i));
   }
 
-  function useExample(prompt) {
-    setTaskDraft(prompt);
+  // Apply the ACC panel's provider/model (and key, if one was set on the
+  // panel) to the no-ACC panel so both sides run the same model config.
+  function handleCopyAcc() {
+    const accPanel = panels.find((p) => p.acc);
+    if (!accPanel) return;
+    setPanels((prev) =>
+      prev.map((p) =>
+        p.acc ? p : { ...p, provider: accPanel.provider, model: accPanel.model, apiKey: accPanel.apiKey || '' }
+      )
+    );
   }
 
   /* Run → persist the pending battle and navigate to /battle ------------- */
@@ -217,6 +371,7 @@ export default function App() {
     localStorage.setItem(
       PENDING_BATTLE_KEY,
       JSON.stringify({
+        id: repo.battleId || `b${Date.now().toString(36)}`,
         ts: Date.now(),
         repo: {
           name: repo.name,
@@ -247,9 +402,31 @@ export default function App() {
     } catch {
       // Server already gone (restarted, sandbox wiped) — still remove locally.
     }
+    clearPendingIfMatch(h);
     const next = history.filter((x) => x.id !== h.id);
     setHistory(next);
     saveHistory(next);
+  }
+
+  // Stop a running battle from history: mark it stopped and clear its pending
+  // battle so returning to /battle does not auto-restart it.
+  function stopHistoryItem(h) {
+    const next = history.map((x) => (x.id === h.id ? { ...x, status: 'stopped' } : x));
+    setHistory(next);
+    saveHistory(next);
+    clearPendingIfMatch(h);
+  }
+
+  // If the pending (running) battle matches this history entry, drop it.
+  function clearPendingIfMatch(h) {
+    try {
+      const pending = JSON.parse(localStorage.getItem(PENDING_BATTLE_KEY) || 'null');
+      if (pending && (pending.id === h.id || pending.repo?.battleId === h.battleId)) {
+        localStorage.removeItem(PENDING_BATTLE_KEY);
+      }
+    } catch {
+      // malformed pending battle — ignore
+    }
   }
 
   // Clear all: wipe local history AND every server-side battle + report.
@@ -259,6 +436,7 @@ export default function App() {
     } catch {
       // Server unreachable — still clear locally.
     }
+    localStorage.removeItem(PENDING_BATTLE_KEY);
     setHistory([]);
     saveHistory([]);
   }
@@ -354,7 +532,6 @@ export default function App() {
                   The <strong className="font-semibold text-[var(--color-accent)]">ACC panel is always first</strong> and highlighted — it runs the
                   framework. The other panel runs without it.
                 </p>
-
                 <div className="mt-4 space-y-3">
                   {panels.map((p) => (
                     <PanelConfig
@@ -362,6 +539,8 @@ export default function App() {
                       panel={p}
                       liveModels={liveModels}
                       modelsLoading={modelsLoading}
+                      freebuffRunning={freebuffRunning}
+                      onCopyAcc={handleCopyAcc}
                       onPanel={(np) => setPanels((prev) => prev.map((x) => (x.id === np.id ? np : x)))}
                     />
                   ))}
@@ -411,45 +590,20 @@ export default function App() {
                   </label>
                 </div>
 
-                <div className="prompt-shell relative mt-3">
-                  <input
-                    id="repo-input"
-                    type="text"
-                    placeholder={
-                      github.login
-                        ? `Search your GitHub repos or paste any URL — e.g. ${github.login}/repo…`
-                        : 'Local path or GitHub URL — e.g. ./my-project or https://github.com/user/repo'
-                    }
-                    value={repoInput}
-                    onChange={(e) => {
-                      setRepoInput(e.target.value);
-                      setGhFilter('');
-                    }}
-                    onKeyDown={(e) => e.key === 'Enter' && handleLoadRepo()}
-                    spellCheck="false"
-                    className="no-scrollbar block w-full bg-transparent px-4 py-3.5 text-[13px] leading-relaxed text-[var(--color-ink)] outline-none placeholder:text-[var(--color-ink-faint)] sm:text-[14px]"
-                  />
-                  <button
-                    type="button"
-                    onClick={handleLoadRepo}
-                    disabled={loadingRepo}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 rounded-lg bg-[var(--color-panel-hi)] px-2.5 py-1.5 text-[11px] font-medium text-[var(--color-ink-dim)] transition-colors hover:bg-[var(--color-line-hi)] hover:text-[var(--color-ink)] disabled:opacity-50"
-                  >
-                    {loadingRepo ? `loading… ${loadElapsed}s` : 'Load'}
-                  </button>
-                </div>
-                {/* GitHub account repo suggestions (when connected) */}
-                {github.login && github.repos.length > 0 && (
-                  <RepoSuggestions
-                    repos={github.repos}
-                    filter={ghFilter}
-                    onFilter={(f) => setGhFilter(f)}
-                    onPick={(full) => {
-                      setRepoInput(full);
-                      setGhFilter('');
-                    }}
-                  />
-                )}
+                <RepoAutocomplete
+                  value={repoInput}
+                  onChange={setRepoInput}
+                  onLoad={handleLoadRepo}
+                  onFindFolder={openFolderBrowser}
+                  repos={github.login ? github.repos : []}
+                  busy={loadingRepo}
+                  loadingLabel={`loading… ${loadElapsed}s`}
+                  placeholder={
+                    github.login
+                      ? `Search your GitHub repos or paste any URL — e.g. ${github.login}/repo…`
+                      : 'Local path or GitHub URL — e.g. ./my-project or https://github.com/user/repo'
+                  }
+                />
                 {repo && (
                   <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-[var(--color-ink-dim)]">
                     <span className="inline-flex items-center gap-1 rounded-md border border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-[var(--color-accent)]">
@@ -494,6 +648,25 @@ export default function App() {
                       <li key={i} className="flex items-center gap-2 rounded-lg border border-[var(--color-line)] bg-[var(--color-panel)] px-2.5 py-1.5">
                         <span className="font-mono text-[10px] tabular-nums text-[var(--color-ink-faint)]">{i + 1}</span>
                         <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--color-ink-dim)]">{t.title}</span>
+                        <span className="flex shrink-0 items-center gap-0.5 rounded-md bg-[var(--color-panel-hi)] p-0.5">
+                          {['plan', 'act'].map((m) => (
+                            <button
+                              key={m}
+                              type="button"
+                              onClick={() => setTaskMode(i, m)}
+                              title={m === 'plan' ? 'Plan only — the agent writes a plan, no code changes' : 'Act — the agent edits the code, then the harness starts the project to verify it still runs'}
+                              className={`rounded px-1.5 py-0.5 font-pixel text-[8px] uppercase tracking-[0.12em] transition-colors ${
+                                (t.mode || 'act') === m
+                                  ? m === 'act'
+                                    ? 'bg-[var(--color-accent)]/20 text-[var(--color-accent)]'
+                                    : 'bg-[var(--color-line-hi)] text-[var(--color-ink)]'
+                                  : 'text-[var(--color-ink-faint)] hover:text-[var(--color-ink-dim)]'
+                              }`}
+                            >
+                              {m}
+                            </button>
+                          ))}
+                        </span>
                         <button
                           onClick={() => removeTask(i)}
                           className="grid size-6 shrink-0 place-items-center rounded-md text-[var(--color-ink-faint)] transition-colors hover:bg-[var(--color-line)] hover:text-red-400"
@@ -518,21 +691,7 @@ export default function App() {
                         className="no-scrollbar block w-full resize-y bg-transparent px-4 pb-2 pt-3 text-[13px] leading-relaxed text-[var(--color-ink)] outline-none placeholder:text-[var(--color-ink-faint)]"
                       />
                     </div>
-                    <div
-                      className="no-scrollbar mt-1 flex items-center gap-1 overflow-x-auto"
-                      aria-label="Example tasks"
-                    >
-                      <span className="shrink-0 px-1 font-pixel text-[9px] uppercase tracking-[0.14em] text-[var(--color-ink-faint)]">Try</span>
-                      {TASK_EXAMPLES.map((example) => (
-                        <button
-                          key={example.label}
-                          type="button"
-                          onClick={() => useExample(example.prompt)}
-                          className="shrink-0 rounded-md px-2.5 py-1.5 text-[11px] text-[var(--color-ink-dim)] transition-colors hover:bg-[var(--color-panel-hi)] hover:text-[var(--color-ink)]"
-                        >
-                          {example.label}
-                        </button>
-                      ))}
+                    <div className="mt-1.5 flex justify-end">
                       <button
                         type="button"
                         onClick={addTask}
@@ -596,8 +755,89 @@ export default function App() {
         </footer>
       </div>
 
+      {/* ========================== FIND FOLDER MODAL ====================== */}
+      {(() => {
+        const { mounted, visible } = useOverlay(folderOpen);
+        if (!mounted) return null;
+        return (
+          <div className="fixed inset-0 z-50" role="dialog" aria-modal="true" aria-labelledby="folder-title">
+            <div
+              className={`absolute inset-0 bg-black/80 backdrop-blur-md transition-opacity duration-200 ${visible ? 'opacity-100' : 'opacity-0'}`}
+              onClick={() => setFolderOpen(false)}
+            />
+            <div
+              className={`panel-premium absolute left-1/2 top-1/2 w-[min(92vw,520px)] -translate-x-1/2 -translate-y-1/2 p-5 shadow-2xl transition-all duration-200 ease-out sm:p-6 ${
+                visible ? 'opacity-100 scale-100' : 'opacity-0 scale-[0.97]'
+              }`}
+            >
+            <div className="flex items-center gap-2.5">
+              <span className="grid size-10 place-items-center rounded-xl bg-[var(--color-accent)]/10 text-[var(--color-accent)]">
+                <Icon name="folder" className="size-5" />
+              </span>
+              <div className="min-w-0 flex-1">
+                <h2 id="folder-title" className="text-[14px] font-medium text-[var(--color-ink)]">
+                  Find folder
+                </h2>
+                <p className="mt-0.5 truncate font-mono text-[10px] text-[var(--color-ink-faint)]">{folderPath || 'loading…'}</p>
+              </div>
+              <button
+                onClick={() => setFolderOpen(false)}
+                aria-label="Close"
+                className="grid size-8 place-items-center rounded-md text-[var(--color-ink-faint)] transition-colors hover:bg-[var(--color-line)] hover:text-[var(--color-ink)]"
+              >
+                <Icon name="x" className="size-4" />
+              </button>
+            </div>
+            <div className="mt-4 flex items-center gap-2">
+              <button
+                onClick={() => navigateFolder(folderParent)}
+                disabled={!folderParent || folderBusy}
+                className="control-surface flex items-center gap-1 px-3 py-1.5 text-[11px] disabled:opacity-40"
+              >
+                <Icon name="arrow-left" className="size-3.5" />
+                up
+              </button>
+              <span className="text-[10px] text-[var(--color-ink-faint)]">browse the machine running ABA — pick the project folder</span>
+            </div>
+            <div className="no-scrollbar mt-2 max-h-[40vh] overflow-y-auto rounded-xl border border-[var(--color-line)] bg-[var(--color-surface)] p-1.5">
+              {folderBusy && <p className="px-2 py-3 text-center text-[11px] text-[var(--color-ink-faint)]">loading…</p>}
+              {!folderBusy && folderError && <p className="px-2 py-3 text-center text-[11px] text-red-400">{folderError}</p>}
+              {!folderBusy && !folderError && folderDirs.length === 0 && (
+                <p className="px-2 py-3 text-center text-[11px] text-[var(--color-ink-faint)]">(no subfolders)</p>
+              )}
+              {!folderBusy &&
+                !folderError &&
+                folderDirs.map((d) => (
+                  <button
+                    key={d}
+                    onClick={() => navigateFolder(folderPath === '/' ? `/${d}` : `${folderPath}/${d}`)}
+                    className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[12px] text-[var(--color-ink-dim)] transition-colors hover:bg-[var(--color-panel-hi)] hover:text-[var(--color-ink)]"
+                  >
+                    <Icon name="folder" className="size-3.5 shrink-0 text-[var(--color-ink-faint)]" />
+                    <span className="truncate">{d}</span>
+                  </button>
+                ))}
+            </div>
+            <div className="mt-4 flex justify-end gap-2">
+              <button className="control-surface px-4 py-2 text-[12px]" onClick={() => setFolderOpen(false)}>
+                Cancel
+              </button>
+              <button
+                onClick={loadFromFolder}
+                disabled={folderBusy || !folderPath}
+                className="action-primary flex items-center gap-1.5 px-4 py-2 text-[12px] font-semibold disabled:opacity-50"
+              >
+                <Icon name="play" className="size-3.5" />
+                Load this folder
+              </button>
+            </div>
+          </div>
+          </div>
+        );
+      })()}
+
       {/* ============================ KEY MODAL ============================ */}
-      <KeyModal open={keyModal} onClose={() => setKeyModal(false)} onSaved={() => refreshModels()} />
+      <KeyModal open={keyModal} onClose={() => setKeyModal(false)} onSaved={() => refreshModels()} freebuffRunning={freebuffRunning} />
 
       {/* ========================== SETTINGS MODAL ========================= */}
       <SettingsModal
@@ -616,6 +856,8 @@ export default function App() {
         onClose={() => setHistoryOpen(false)}
         onClear={clearHistory}
         onDelete={deleteHistoryItem}
+        onStop={stopHistoryItem}
+        onResume={navigateToBattle}
       />
     </div>
   );

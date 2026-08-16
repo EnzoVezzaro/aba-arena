@@ -2,9 +2,15 @@
  * The default benchmark series. Each task runs on BOTH panels (ACC vs
  * no-ACC) with the same repository context and the same model config.
  *
+ * `mode` decides how the agent works inside its sandbox:
+ *   - 'plan' — the agent only produces a plan (no code changes, no verify).
+ *   - 'act'  — the agent edits the code, then the harness runs the project
+ *              automatically ("start the project") and reports `verified`;
+ *              a project that no longer runs fails the task.
+ *
  * The success check is a transparent heuristic (output length + content
- * hints) — it is displayed as such in the UI, never presented as a
- * rigorous metric.
+ * hints) combined with the verified flag for act tasks — displayed as such
+ * in the UI, never presented as a rigorous metric.
  */
 export const DEFAULT_TASKS = [
   {
@@ -13,20 +19,23 @@ export const DEFAULT_TASKS = [
       'Summarize this repository: its purpose, main modules and how they relate, and the conventions a contributor must follow. Be specific and concrete.',
     hints: [/module|component|service|architecture|api|package/i, /convention|pattern|style|rule/i],
     minChars: 120,
+    mode: 'plan',
   },
   {
     title: 'Write a unit test',
     prompt:
-      'Write one meaningful unit test for the primary module of this repository. Explain in one short paragraph what it verifies, then give the test code.',
+      'Write one meaningful unit test for the primary module of this repository. Explain in one short paragraph what it verifies, then give the test code, then make the change in the repository.',
     hints: [/test|assert|expect|describe|it\(/i, /```/],
     minChars: 120,
+    mode: 'act',
   },
   {
     title: 'Find and fix a bug',
     prompt:
-      'Find the most likely bug or code smell in the main source files of this repository. Propose a concrete fix, including a code snippet showing the corrected code.',
+      'Find the most likely bug or code smell in the main source files of this repository. Propose a concrete fix, apply the fix to the code, and explain what you changed.',
     hints: [/bug|smell|issue|risk|fix/i, /```/],
     minChars: 150,
+    mode: 'act',
   },
   {
     title: 'Add a feature (plan)',
@@ -34,6 +43,7 @@ export const DEFAULT_TASKS = [
       'Explain how you would add a new feature to this project following its existing conventions: which files you would touch, in what order, and how you would validate the change.',
     hints: [/feature|step|file|module|implement/i],
     minChars: 120,
+    mode: 'plan',
   },
 ];
 

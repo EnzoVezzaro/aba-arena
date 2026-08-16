@@ -13,18 +13,27 @@ import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
  */
 
 // Models-list endpoints. OpenAI-compatible providers return { data: [{ id }] }.
+// These are fetched through the ABA server (/api/models?provider=...) because
+// some providers (NVIDIA) don't send CORS headers to localhost — the browser
+// would silently block the direct fetch and the dropdown would fall back to
+// the static list. `public` means the endpoint works without an API key.
 const MODELS_API = {
-  openai: { url: 'https://api.openai.com/v1/models', kind: 'openai' },
-  anthropic: { url: 'https://api.anthropic.com/v1/models', kind: 'anthropic' },
-  google: { url: 'https://generativelanguage.googleapis.com/v1beta/openai/models', kind: 'openai' },
-  openrouter: { url: 'https://openrouter.ai/api/v1/models', kind: 'openai' },
-  groq: { url: 'https://api.groq.com/openai/v1/models', kind: 'openai' },
-  deepseek: { url: 'https://api.deepseek.com/models', kind: 'openai' },
-  mistral: { url: 'https://api.mistral.ai/v1/models', kind: 'openai' },
-  xai: { url: 'https://api.x.ai/v1/models', kind: 'openai' },
-  cerebras: { url: 'https://api.cerebras.ai/v1/models', kind: 'openai' },
-  ollama: { url: 'http://localhost:11434/v1/models', kind: 'openai', noKey: true },
-  lmstudio: { url: 'http://localhost:1234/v1/models', kind: 'openai', noKey: true },
+  openai: { kind: 'openai', public: false },
+  anthropic: { kind: 'anthropic', public: false },
+  google: { kind: 'openai', public: false },
+  openrouter: { kind: 'openai', public: true },
+  groq: { kind: 'openai', public: false },
+  deepseek: { kind: 'openai', public: false },
+  mistral: { kind: 'openai', public: false },
+  xai: { kind: 'openai', public: false },
+  cerebras: { kind: 'openai', public: false },
+  nvidia: { kind: 'openai', public: true },
+  ollama: { kind: 'openai', noKey: true, local: true },
+  lmstudio: { kind: 'openai', noKey: true, local: true },
+  // Optional local Freebuff proxy (aba/freebuff) — its /v1/models is the
+  // "spawn endpoint" the provider's model list comes from. Only useful when
+  // the proxy is running on :8080 (the UI gates the provider on that).
+  freebuff: { kind: 'openai', noKey: true, public: true },
 };
 
 const EXCLUDE_MODEL =
@@ -51,23 +60,44 @@ function parseAnthropicModels(json) {
 /**
  * Fetch the live model list for a provider using the configured key.
  * Returns the array of model ids, or throws with a helpful message.
- * Local providers (Ollama/LM Studio) need no key and fetch from localhost.
+ * All fetches go through the ABA server (/api/models?provider=...) so CORS
+ * restrictions (NVIDIA only allows build.nvidia.com) can't silently drop the
+ * list. Local providers (Ollama/LM Studio) are fetched directly since they
+ * run on the same machine and have no CORS.
  */
 export async function fetchProviderModels(providerId, key) {
   const cfg = MODELS_API[providerId];
   if (!cfg) return [];
-  const headers = { 'Content-Type': 'application/json' };
+  if (cfg.local) {
+    const url = `http://localhost:${providerId === 'ollama' ? 11434 : 1234}/v1/models`;
+    const res = await fetch(url, { headers: { 'Content-Type': 'application/json' } });
+    if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+    const json = await res.json();
+    return parseOpenAIModels(json);
+  }
+  const headers = {};
   if (!cfg.noKey && key) headers.Authorization = `Bearer ${key}`;
   if (providerId === 'anthropic') {
     headers['x-api-key'] = key;
     headers['anthropic-version'] = '2023-06-01';
-    headers['anthropic-dangerous-direct-browser-access'] = 'true';
   }
-  const res = await fetch(cfg.url, { headers });
-  if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+  const res = await fetch(`/api/models?provider=${encodeURIComponent(providerId)}`, { headers });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `HTTP ${res.status} ${res.statusText}`);
+  }
   const json = await res.json();
   return cfg.kind === 'anthropic' ? parseAnthropicModels(json) : parseOpenAIModels(json);
 }
+
+// Providers whose model list can be fetched without an API key (their
+// /models endpoint is public) — used so the dropdown always shows the full
+// live list even before a key is saved.
+export const PUBLIC_MODELS_PROVIDERS = new Set(
+  Object.entries(MODELS_API)
+    .filter(([, cfg]) => cfg.public)
+    .map(([id]) => id)
+);
 
 export const PROVIDERS = [
   {
@@ -151,6 +181,20 @@ export const PROVIDERS = [
     models: ['llama-3.3-70b', 'llama-3.1-8b'],
   },
   {
+    id: 'nvidia',
+    label: 'NVIDIA NIM',
+    needsKey: true,
+    create: (key) =>
+      createOpenAICompatible({ name: 'nvidia', baseURL: 'https://integrate.api.nvidia.com/v1', apiKey: key }),
+    models: [
+      'nvidia/llama-3.3-nemotron-super-49b-v1',
+      'nvidia/llama-3.1-nemotron-ultra-253b-v1',
+      'nvidia/llama-3.1-nemotron-nano-8b-v1',
+      'meta/llama-3.1-405b-instruct',
+      'deepseek-ai/deepseek-r1',
+    ],
+  },
+  {
     id: 'ollama',
     label: 'Ollama (local)',
     needsKey: false,
@@ -166,10 +210,40 @@ export const PROVIDERS = [
       createOpenAICompatible({ name: 'lmstudio', baseURL: 'http://localhost:1234/v1', apiKey: 'lm-studio' }),
     models: ['local-model'],
   },
+  {
+    id: 'freebuff',
+    label: 'Freebuff',
+    needsKey: false,
+    free: true, // every model through the Freebuff proxy is free
+    // The auth tokens live in the local proxy process (aba/freebuff/start.cjs)
+    // — the harness talks to http://localhost:8080/v1 with a dummy key. The
+    // live model list comes from the proxy's /v1/models (the spawn endpoint);
+    // this static list is the offline fallback when the proxy is down.
+    create: () =>
+      createOpenAICompatible({ name: 'freebuff', baseURL: 'http://localhost:8080/v1', apiKey: 'freebuff' }),
+    models: [
+      'minimax/minimax-m2.7',
+      'z-ai/glm-5.1',
+      'google/gemini-2.5-flash-lite',
+      'google/gemini-3.1-flash-lite-preview',
+    ],
+  },
 ];
 
 export function getProvider(id) {
   return PROVIDERS.find((p) => p.id === id) || PROVIDERS[0];
+}
+
+/**
+ * True when a model is free of charge: the provider marks all its models
+ * free (freebuff), or the model id carries a free marker (OpenRouter's
+ * `:free` suffix, freebuff agent ids like `base2-free`). Used by the model
+ * dropdown to render a FREE chip and to filter when the search says "free".
+ */
+export function isFreeModel(providerId, modelId) {
+  const p = getProvider(providerId);
+  if (p && p.free) return true;
+  return /:\s*free$|\bfree\b/i.test(String(modelId || ''));
 }
 
 // Approximate $ per 1M tokens (input/output). Estimates — shown as "~".

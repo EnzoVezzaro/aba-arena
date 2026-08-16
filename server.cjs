@@ -9,18 +9,43 @@
  *   GET  /api/health  → { ok, acc: { source, version } }
  *   POST /api/repo    → { source } → imports the repo and returns
  *                       { repo, baseContext, accContext }
+ *   POST /api/agent/run → runs the agent harness inside a panel sandbox
+ *                       (plan/act + "start the project" verification)
  *   POST /api/report  → persists a finished battle report as JSON
  *
- * All LLM calls happen in the browser (Vercel AI SDK, keys stay in the
- * user's browser). This server only prepares the repository side of the
- * battle: an isolated snapshot, the plain "no ACC" context, and the
- * "ACC installed" context produced by the acc CLI.
+ * LLM calls happen server-side through the agent harness (harness.cjs),
+ * which is copied into each battle sandbox and driven by the Vercel AI SDK
+ * with a custom base URL — the same provider config the browser uses. The
+ * browser sends the panel's provider/model/key to the local server for the
+ * duration of a run; it never leaves the machine.
  */
 
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const { spawn, execSync } = require('child_process');
+const { randomBytes, createHash } = require('crypto');
+
+// Minimal .env loader (no dotenv dependency): ABA_GITHUB_CLIENT_SECRET etc.
+// can live in aba/.env instead of the shell environment. Real environment
+// variables always win over the file.
+try {
+  const envFile = fs.readFileSync(path.join(__dirname, '.env'), 'utf8');
+  for (const line of envFile.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eq = trimmed.indexOf('=');
+    if (eq <= 0) continue;
+    const key = trimmed.slice(0, eq).trim();
+    let value = trimmed.slice(eq + 1).trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    if (!(key in process.env)) process.env[key] = value;
+  }
+} catch {
+  // no .env file — shell env vars are used instead
+}
 
 const PORT = Number(process.env.ABA_PORT || 4317);
 const UI_DIST = path.join(__dirname, 'ui', 'dist');
@@ -28,6 +53,69 @@ const SANDBOX_DIR = path.join(process.env.HOME || '/tmp', '.aba-sandbox');
 const MAX_CONTEXT_BYTES = 24000;
 const MAX_AGENTS_MD = 5;
 const AGENTS_MD_CHARS = 1600;
+
+// Provider model-list endpoints, proxied server-side: the browser cannot
+// fetch some of these directly (NVIDIA's /v1/models only sends CORS headers
+// for build.nvidia.com, so localhost gets blocked silently), so the server
+// fetches them and returns the JSON unchanged. `public` means the endpoint
+// works without an API key.
+const MODELS_ENDPOINTS = {
+  openai: { url: 'https://api.openai.com/v1/models', public: false },
+  anthropic: { url: 'https://api.anthropic.com/v1/models', public: false },
+  google: { url: 'https://generativelanguage.googleapis.com/v1beta/openai/models', public: false },
+  openrouter: { url: 'https://openrouter.ai/api/v1/models', public: true },
+  groq: { url: 'https://api.groq.com/openai/v1/models', public: false },
+  deepseek: { url: 'https://api.deepseek.com/models', public: false },
+  mistral: { url: 'https://api.mistral.ai/v1/models', public: false },
+  xai: { url: 'https://api.x.ai/v1/models', public: false },
+  cerebras: { url: 'https://api.cerebras.ai/v1/models', public: false },
+  nvidia: { url: 'https://integrate.api.nvidia.com/v1/models', public: true },
+  // Optional local Freebuff proxy (aba/freebuff) — only reachable when the
+  // proxy is actually running on :8080; the fetch fails cleanly otherwise.
+  freebuff: { url: 'http://localhost:8080/v1/models', public: true },
+};
+
+// Chat-completion endpoints used to configure the agent harness that runs
+// INSIDE each sandbox. `kind` selects the AI SDK adapter in the harness
+// ('openai-compatible' for custom-base-URL providers, 'anthropic' for the
+// native Anthropic API). Matches aba/ui/src/providers.js.
+const PROVIDER_ENDPOINTS = {
+  openai: { baseURL: 'https://api.openai.com/v1', kind: 'openai-compatible', needsKey: true },
+  anthropic: { baseURL: 'https://api.anthropic.com/v1', kind: 'anthropic', needsKey: true },
+  google: { baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai', kind: 'openai-compatible', needsKey: true },
+  openrouter: { baseURL: 'https://openrouter.ai/api/v1', kind: 'openai-compatible', needsKey: true },
+  groq: { baseURL: 'https://api.groq.com/openai/v1', kind: 'openai-compatible', needsKey: true },
+  deepseek: { baseURL: 'https://api.deepseek.com', kind: 'openai-compatible', needsKey: true },
+  mistral: { baseURL: 'https://api.mistral.ai/v1', kind: 'openai-compatible', needsKey: true },
+  xai: { baseURL: 'https://api.x.ai/v1', kind: 'openai-compatible', needsKey: true },
+  cerebras: { baseURL: 'https://api.cerebras.ai/v1', kind: 'openai-compatible', needsKey: true },
+  nvidia: { baseURL: 'https://integrate.api.nvidia.com/v1', kind: 'openai-compatible', needsKey: true },
+  ollama: { baseURL: 'http://localhost:11434/v1', kind: 'openai-compatible', needsKey: false },
+  lmstudio: { baseURL: 'http://localhost:1234/v1', kind: 'openai-compatible', needsKey: false },
+  // Optional local Freebuff proxy (aba/freebuff) — auth tokens live in the
+  // proxy process, so the harness needs no key from the browser.
+  freebuff: { baseURL: 'http://localhost:8080/v1', kind: 'openai-compatible', needsKey: false },
+};
+
+// The agent harness that runs inside each sandbox. Copied into every battle
+// sandbox at repo load; the AI SDK resolves from the UI's node_modules via
+// NODE_PATH when the server spawns it.
+const HARNESS_SRC = path.join(__dirname, 'harness.cjs');
+
+// GitHub OAuth (web flow + PKCE, popup) — click "Connect GitHub", authorize
+// on GitHub, done. The server proxies the token exchange so the code_verifier
+// (and optionally the client secret) never reach the browser.
+const GITHUB_CLIENT_ID = process.env.ABA_GITHUB_CLIENT_ID || 'Iv23licG5JnDx0V14zDh';
+// Optional — only needed if GitHub rejects the PKCE-only token exchange.
+const GITHUB_CLIENT_SECRET = process.env.ABA_GITHUB_CLIENT_SECRET || '';
+// Local callback: GitHub redirects the popup here after authorization. This
+// must be registered as a callback URL in the app settings
+// (github.com/settings/apps → ACC Battle Arena → Identifying and authorizing
+// users → add a Redirect URI of http://localhost:4317/api/github/callback).
+const GITHUB_REDIRECT_URI = process.env.ABA_GITHUB_REDIRECT_URI || 'http://localhost:4317/api/github/callback';
+// PKCE sessions: state -> { verifier, expires }. In-memory — the verifier
+// never leaves the server.
+const ghSessions = new Map();
 
 // ---------------------------------------------------------------------------
 // acc CLI resolution — prefers the npm-installed package (remote install),
@@ -455,6 +543,46 @@ function serveStatic(req, res, pathname) {
 
 let currentRepo = null; // { name, source, sha, workDir, baseContext, accContext }
 
+// Live check for the optional local Freebuff proxy (aba/freebuff). Pure
+// config: ABA never starts the proxy on its own unless the user opts in with
+// ABA_FREEBUFF_AUTOSTART=1 — running it uses the user's Freebuff token, which
+// would fight their own active session.
+function checkFreebuffRunning() {
+  return new Promise((resolve) => {
+    const req = http.get('http://127.0.0.1:8080/healthz', { timeout: 1500 }, (res) => {
+      res.resume();
+      resolve(res.statusCode === 200);
+    });
+    req.on('error', () => resolve(false));
+    req.on('timeout', () => {
+      req.destroy();
+      resolve(false);
+    });
+  });
+}
+
+// Optional: boot the vendored Freebuff2API proxy locally (no Docker) when the
+// user explicitly asked for it. Default is OFF — see aba/freebuff/README.md.
+function maybeStartFreebuff() {
+  if (process.env.ABA_FREEBUFF_AUTOSTART !== '1') return;
+  const script = path.join(__dirname, 'freebuff', 'start.cjs');
+  if (!fs.existsSync(script)) return;
+  const child = spawn(process.execPath, [script], { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+  let out = '';
+  child.stdout.on('data', (d) => (out += d));
+  child.stderr.on('data', (d) => (out += d));
+  child.on('close', () => {
+    const line = out.trim().split('\n').pop() || '';
+    try {
+      const status = JSON.parse(line);
+      console.log(`  Freebuff:    ${status.running ? 'proxy running on :8080' : status.reason === 'no-tokens' ? 'configured — no tokens (set ABA_FREEBUFF_TOKENS or log into the Freebuff CLI)' : `proxy not running (${status.reason})`}`);
+    } catch {
+      console.log('  Freebuff:    proxy bootstrap failed — see ~/.aba-sandbox/freebuff/freebuff.log');
+    }
+  });
+  child.unref();
+}
+
 async function handleApi(req, res, url) {
   const method = req.method;
 
@@ -465,7 +593,126 @@ async function handleApi(req, res, url) {
       acc: { source: acc.kind, path: acc.path || null },
       sandbox: SANDBOX_DIR,
       repoLoaded: !!currentRepo,
+      githubOauthConfigured: !!GITHUB_CLIENT_SECRET,
     });
+    return;
+  }
+
+  // Optional Freebuff proxy status: { running } — the UI shows the Freebuff
+  // provider only when the local proxy answers.
+  if (method === 'GET' && url.pathname === '/api/freebuff/status') {
+    const running = await checkFreebuffRunning();
+    sendJson(res, 200, { running, port: 8080 });
+    return;
+  }
+
+  // Provider model-list proxy: GET /api/models?provider=nvidia. The server
+  // fetches the provider's /models endpoint server-side (no CORS), forwarding
+  // the caller's Authorization / x-api-key headers so keyed providers work
+  // too. Public endpoints are fetched without a key.
+  if (method === 'GET' && url.pathname === '/api/models') {
+    const provider = url.searchParams.get('provider') || '';
+    const cfg = MODELS_ENDPOINTS[provider];
+    if (!cfg) {
+      sendJson(res, 400, { error: `unknown provider: ${provider}` });
+      return;
+    }
+    try {
+      const headers = { Accept: 'application/json' };
+      if (req.headers.authorization) headers.Authorization = req.headers.authorization;
+      if (req.headers['x-api-key']) {
+        headers['x-api-key'] = req.headers['x-api-key'];
+        headers['anthropic-version'] = '2023-06-01';
+      }
+      const upstream = await fetch(cfg.url, { headers });
+      const text = await upstream.text();
+      if (!upstream.ok) {
+        sendJson(res, upstream.status, { error: `upstream HTTP ${upstream.status}`, detail: text.slice(0, 300) });
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(text);
+    } catch (err) {
+      sendJson(res, 502, { error: `failed to reach ${provider}: ${err.message}` });
+    }
+    return;
+  }
+
+  // GitHub OAuth (web flow + PKCE): GET /api/github/start opens a session and
+  // 302s the popup to GitHub's authorize page. GitHub redirects back to
+  // /api/github/callback, which exchanges the code for a user access token and
+  // hands it to the app via window.opener.postMessage. PKCE keeps the client
+  // secret optional — it is sent only if ABA_GITHUB_CLIENT_SECRET is set.
+  if (method === 'GET' && url.pathname === '/api/github/start') {
+    const state = randomBytes(16).toString('hex');
+    const verifier = randomBytes(32).toString('base64url');
+    const challenge = createHash('sha256').update(verifier).digest('base64url');
+    ghSessions.set(state, { verifier, expires: Date.now() + 10 * 60 * 1000 });
+    const params = new URLSearchParams({
+      client_id: GITHUB_CLIENT_ID,
+      redirect_uri: GITHUB_REDIRECT_URI,
+      scope: 'repo',
+      state,
+      code_challenge: challenge,
+      code_challenge_method: 'S256',
+    });
+    res.writeHead(302, { Location: `https://github.com/login/oauth/authorize?${params}` });
+    res.end();
+    return;
+  }
+
+  if (method === 'GET' && url.pathname === '/api/github/callback') {
+    const code = url.searchParams.get('code') || '';
+    const state = url.searchParams.get('state') || '';
+    const session = ghSessions.get(state);
+    ghSessions.delete(state);
+    // HTML handed to the popup: it posts the result to the opener and closes.
+    const respond = (payload) => {
+      const html = `<!doctype html><html><head><meta charset="utf-8"><title>ABA · GitHub</title></head><body style="font:14px system-ui;padding:24px;color:#333"><script>
+        const payload = ${JSON.stringify(payload)};
+        if (window.opener) {
+          window.opener.postMessage({ type: 'aba-github-auth', ...payload }, '*');
+          window.close();
+        } else {
+          document.body.textContent = payload.error
+            ? 'GitHub sign-in failed: ' + payload.error
+            : 'Connected — you can close this tab.';
+        }
+      <\/script></body></html>`;
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(html);
+    };
+    if (!code || !state || !session || session.expires < Date.now()) {
+      respond({ error: 'The sign-in link was invalid or expired — try again.' });
+      return;
+    }
+    try {
+      const body = new URLSearchParams({
+        client_id: GITHUB_CLIENT_ID,
+        code,
+        redirect_uri: GITHUB_REDIRECT_URI,
+        code_verifier: session.verifier,
+      });
+      if (GITHUB_CLIENT_SECRET) body.set('client_secret', GITHUB_CLIENT_SECRET);
+      const gh = await fetch('https://github.com/login/oauth/access_token', {
+        method: 'POST',
+        headers: { Accept: 'application/json' },
+        body,
+      });
+      const data = await gh.json().catch(() => ({}));
+      if (data.access_token) {
+        respond({ token: data.access_token });
+      } else if (data.error === 'incorrect_client_credentials') {
+        respond({
+          error:
+            'GitHub rejected the token exchange — the client secret is missing or wrong. Generate one under "Client secrets" in the GitHub App settings and restart the server with ABA_GITHUB_CLIENT_SECRET set.',
+        });
+      } else {
+        respond({ error: data.error_description || data.error || 'GitHub could not complete the sign-in.' });
+      }
+    } catch (err) {
+      respond({ error: `GitHub token exchange failed: ${err.message}` });
+    }
     return;
   }
 
@@ -477,12 +724,17 @@ async function handleApi(req, res, url) {
         sendJson(res, 400, { error: 'source is required (local path or GitHub URL)' });
         return;
       }
+      const isUrl = /^https?:\/\//i.test(source);
+      // The client can pin the type (e.g. a repo picked from the GitHub
+      // autocomplete is always 'github', even in owner/repo shorthand).
+      const type = body.type === 'github' ? 'github' : isUrl ? (source.includes('github.com') ? 'github' : 'git') : 'local';
       const { importProject, copyDirectory } = require('./importer.cjs');
       const importResult = await importProject({
-        type: /^https?:\/\//i.test(source) ? (source.includes('github.com') ? 'github' : 'git') : 'local',
+        type,
         pathOrUrl: source,
         revision: body.revision,
         sandboxDir: SANDBOX_DIR,
+        ...(body.token ? { token: body.token } : {}),
       });
       const workDir = importResult.snapshotDir || importResult.originalDir;
       const info = importResult.snapshotInfo;
@@ -510,6 +762,36 @@ async function handleApi(req, res, url) {
       const baseContext = buildBaseContext(plainDir, info);
       const accResult = await buildAccContext(accDir, info, baseContext);
 
+      // Install the agent harness INSIDE both sandboxes so the battle runs
+      // through it (plan/act + "start the project" verification) instead of
+      // the browser streaming directly. Self-check verifies the sandbox copy
+      // boots and its tools work.
+      const harness = { installed: false, selfCheck: null };
+      try {
+        for (const dir of [accDir, plainDir]) {
+          const target = path.join(dir, '.aba-agent.cjs');
+          fs.copyFileSync(HARNESS_SRC, target);
+        }
+        harness.installed = true;
+        const probe = spawn(process.execPath, [path.join(accDir, '.aba-agent.cjs'), '--selfcheck'], {
+          cwd: accDir,
+          env: { ...process.env, NODE_PATH: path.join(__dirname, 'ui', 'node_modules') },
+        });
+        const probeOut = await new Promise((resolve) => {
+          let out = '';
+          probe.stdout.on('data', (d) => (out += d));
+          probe.stderr.on('data', (d) => (out += d));
+          probe.on('close', () => resolve(out));
+        });
+        try {
+          harness.selfCheck = JSON.parse(probeOut.split('\n').filter(Boolean).pop());
+        } catch {
+          harness.selfCheck = { ok: false, error: probeOut.slice(0, 200) };
+        }
+      } catch (err) {
+        harness.error = err.message;
+      }
+
       currentRepo = {
         battleId,
         name: info.sourceType === 'github' ? (source.split('/').pop() || 'repo') : path.basename(workDir),
@@ -525,6 +807,7 @@ async function handleApi(req, res, url) {
         baseContext,
         accContext: accResult.context,
         accPipeline: accResult.steps,
+        harness,
       });
       return;
     } catch (err) {
@@ -566,7 +849,9 @@ async function handleApi(req, res, url) {
       const realRoot = fs.realpathSync(sandboxDir);
       const probe = fs.existsSync(target) ? target : path.dirname(target);
       const realProbe = fs.realpathSync(probe);
-      if (!realProbe.startsWith(realRoot + path.sep)) {
+      // The probe may be the sandbox root itself (tree at /, or a write
+      // creating a new file at the root) — that is inside, not an escape.
+      if (realProbe !== realRoot && !realProbe.startsWith(realRoot + path.sep)) {
         sendJson(res, 403, { error: 'path escapes the sandbox' });
         return;
       }
@@ -613,6 +898,117 @@ async function handleApi(req, res, url) {
       sendJson(res, 405, { error: 'method not allowed' });
       return;
     }
+  }
+
+  // Run the agent harness inside a panel's sandbox. The harness (copied into
+  // each sandbox at repo load) runs the agentic loop with the panel's
+  // provider/model/key via the AI SDK + custom base URL, then (for act tasks)
+  // asks the agent to start the project and reports verified. NDJSON events
+  // are streamed back line-by-line so the battle page shows live output.
+  if (method === 'POST' && url.pathname === '/api/agent/run') {
+    const body = await readBody(req);
+    const panel = body.panel === 'plain' ? 'plain' : 'acc';
+    const sandboxDir = currentRepo && currentRepo.sandboxes && currentRepo.sandboxes[panel];
+    const harnessFile = sandboxDir && path.join(sandboxDir, '.aba-agent.cjs');
+    if (!harnessFile || !fs.existsSync(harnessFile)) {
+      sendJson(res, 400, { error: 'no repo loaded — load a repository first' });
+      return;
+    }
+    const providerCfg = PROVIDER_ENDPOINTS[body.provider];
+    if (!providerCfg) {
+      sendJson(res, 400, { error: `unknown provider: ${body.provider}` });
+      return;
+    }
+    const mode = body.mode === 'plan' ? 'plan' : 'act';
+    if (providerCfg.needsKey && !body.apiKey) {
+      sendJson(res, 400, { error: `API key required for ${body.provider}` });
+      return;
+    }
+
+    // Stream NDJSON events to the client, killing the harness on disconnect
+    // or a hard deadline so a stuck provider can never leave a zombie.
+    res.writeHead(200, { 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'no-cache' });
+    const nodePath = path.join(__dirname, 'ui', 'node_modules');
+    const env = {
+      ...process.env,
+      NODE_PATH: nodePath,
+      ABA_KIND: providerCfg.kind,
+      ABA_BASE_URL: providerCfg.baseURL,
+      ABA_API_KEY: body.apiKey || '',
+      ABA_MODEL: body.model || '',
+      ABA_MODE: mode,
+      ABA_TASK: String(body.task || ''),
+      ABA_CONTEXT: String(body.context || ''),
+      ABA_SYSTEM: String(body.system || ''),
+      ABA_VERIFY: body.verify && mode === 'act' ? '1' : '0',
+      ABA_MAX_STEPS: String(body.maxSteps || 12),
+      ABA_MAX_TOKENS: String(body.maxTokens || 4000),
+    };
+    const child = spawn(process.execPath, [harnessFile], { cwd: sandboxDir, env });
+    let closed = false;
+    const hardTimer = setTimeout(() => {
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        /* ignore */
+      }
+      if (!closed) {
+        closed = true;
+        res.end('{"type":"error","message":"Timed out after 120s — the provider did not respond."}\n');
+      }
+    }, 120000);
+    child.stdout.on('data', (d) => {
+      if (!closed) res.write(d);
+    });
+    child.stderr.on('data', (d) => {
+      if (!closed) res.write(JSON.stringify({ type: 'stderr', text: String(d) }) + '\n');
+    });
+    child.on('close', (code) => {
+      clearTimeout(hardTimer);
+      if (!closed) {
+        closed = true;
+        if (code !== 0) res.write(JSON.stringify({ type: 'error', message: `harness exited with code ${code}` }) + '\n');
+        res.end();
+      }
+    });
+    req.on('close', () => {
+      clearTimeout(hardTimer);
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        /* ignore */
+      }
+    });
+    return;
+  }
+
+  // Folder browser for the "find folder" picker — lists subdirectories of a
+  // path on this machine (the one running the ABA server). Starts at $HOME.
+  if (method === 'GET' && url.pathname === '/api/fs/list') {
+    const requested = url.searchParams.get('path') || '';
+    const target = requested
+      ? path.resolve(requested)
+      : process.env.HOME || process.cwd();
+    try {
+      if (!fs.statSync(target).isDirectory()) {
+        sendJson(res, 400, { error: `not a directory: ${target}` });
+        return;
+      }
+      const dirs = fs
+        .readdirSync(target, { withFileTypes: true })
+        .filter((e) => e.isDirectory() && !e.name.startsWith('.'))
+        .map((e) => e.name)
+        .sort((a, b) => a.localeCompare(b));
+      const parent = path.dirname(target);
+      sendJson(res, 200, {
+        path: target,
+        parent: parent === target ? null : parent,
+        dirs,
+      });
+    } catch (err) {
+      sendJson(res, 400, { error: `cannot list ${requested || 'home'}: ${err.message}` });
+    }
+    return;
   }
 
   if (method === 'POST' && url.pathname === '/api/report') {
@@ -692,6 +1088,7 @@ function ensureUiBuilt() {
 
 function startServer(opts = {}) {
   cleanupAbandonedBattles();
+  maybeStartFreebuff();
   return ensureUiBuilt().then((built) => {
     const server = createServer();
     server.listen(PORT, () => {

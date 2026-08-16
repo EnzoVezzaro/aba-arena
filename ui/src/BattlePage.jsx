@@ -1,7 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { streamText, tool } from 'ai';
-import { z } from 'zod';
-import { getProvider, loadKeys, estimateCost } from './providers.js';
+import { getProvider, loadKeys } from './providers.js';
 import { checkSuccess } from './tasks.js';
 import {
   fmtDur,
@@ -10,8 +8,8 @@ import {
   estTokens,
   computeWinners,
 } from './arena.js';
-import { Icon, ResultCard, PENDING_BATTLE_KEY } from './components.jsx';
-import { loadRepo, saveReport, sandboxTree, sandboxRead, sandboxWrite } from './api.js';
+import { Icon, ResultCard, PENDING_BATTLE_KEY, loadHistory, saveHistory } from './components.jsx';
+import { loadRepo, saveReport, sandboxTree, runAgent } from './api.js';
 import Timeline from './Timeline.jsx';
 import IconSprite from './icons.jsx';
 import CodeExplorer from './CodeExplorer.jsx';
@@ -37,6 +35,20 @@ function loadPendingBattle() {
   } catch {
     return null;
   }
+}
+
+// Persist a history entry by id — a battle shows up as "running" the moment it
+// starts and the same entry is updated in place (not duplicated) as it stops or
+// completes, keeping its original start time.
+function upsertHistory(patch) {
+  const h = loadHistory();
+  const idx = h.findIndex((x) => x.id === patch.id);
+  if (idx >= 0) {
+    h[idx] = { ...h[idx], ...patch, ts: h[idx].ts || patch.ts };
+  } else {
+    h.unshift(patch);
+  }
+  saveHistory(h);
 }
 
 function shuffle(items) {
@@ -80,81 +92,12 @@ export default function BattlePage({ onBack }) {
   const tasks = battle?.tasks || [];
   const repo = battle?.repo || null;
 
-  /* ------------------------- agent tools -------------------------------- */
-  // Each panel's agent works inside its own isolated sandbox copy of the
-  // repo. Tools read/write files through the backend — the two sides can
-  // never touch each other's files or the original repository.
-  function agentTools(panelId) {
-    return {
-      list_files: tool({
-        description:
-          'List the files and folders in the repository sandbox. Use this to explore the codebase before editing. Returns a tree of paths.',
-        parameters: z.object({ path: z.string().optional().describe('subdirectory to list, relative to repo root (e.g. src)') }),
-        execute: async ({ path: sub = '' }) => {
-          try {
-            const t = await sandboxTree(panelId);
-            const pick = (nodes, prefix) => {
-              for (const n of nodes) {
-                if (n.type === 'dir') {
-                  const full = n.path;
-                  if (sub === '' || sub === '/' || full === sub || full.startsWith(sub + '/')) {
-                    const child = pick(n.children || [], sub);
-                    if (child) return child;
-                  }
-                } else if (sub === '' || n.path === sub) {
-                  return n;
-                }
-              }
-              return sub ? { path: sub, type: 'missing' } : nodes;
-            };
-            const found = pick(t.tree || [], sub);
-            const flat = (nodes, out = []) => {
-              for (const n of nodes) {
-                out.push(`${n.type === 'dir' ? '[d]' : '[f]'} ${n.path}${n.type === 'file' && n.size != null ? ' (' + n.size + 'b)' : ''}`);
-                if (n.children) flat(n.children, out);
-              }
-              return out;
-            };
-            const lines = flat(Array.isArray(found) ? found : [found]);
-            return lines.length ? lines.join('\n') : `no files at ${sub || '/'}`;
-          } catch (e) {
-            return `error listing files: ${e.message}`;
-          }
-        },
-      }),
-      read_file: tool({
-        description:
-          'Read the full contents of a file from the repository sandbox. Use this before editing so you see the real code.',
-        parameters: z.object({ path: z.string().describe('path to the file, relative to repo root (e.g. src/index.js)') }),
-        execute: async ({ path: filePath }) => {
-          try {
-            const r = await sandboxRead(panelId, filePath);
-            return `--- ${r.path} ---\n${r.content}`;
-          } catch (e) {
-            return `error reading ${filePath}: ${e.message}`;
-          }
-        },
-      }),
-      write_file: tool({
-        description:
-          'Write a file in the repository sandbox (creates or overwrites). Use this to make the code changes the task requires.',
-        parameters: z.object({
-          path: z.string().describe('path to the file, relative to repo root (e.g. src/index.js)'),
-          content: z.string().describe('the complete new file content'),
-        }),
-        execute: async ({ path: filePath, content }) => {
-          try {
-            await sandboxWrite(panelId, filePath, content);
-            return `wrote ${filePath} (${content.length} bytes)`;
-          } catch (e) {
-            return `error writing ${filePath}: ${e.message}`;
-          }
-        },
-      }),
-    };
-  }
-
   /* ------------------------- battle runner ------------------------------- */
+  // Each panel runs the agent harness INSIDE its own isolated sandbox copy
+  // of the repo (installed at repo load). The server spawns the harness with
+  // this panel's provider/model/key and streams its events here — the two
+  // sides can never touch each other's files or the original repository.
+
 
   async function runPanel(panel, context, task, onDelta, onLive) {
     const provider = getProvider(panel.provider);
@@ -170,65 +113,89 @@ export default function BattlePage({ onBack }) {
     let lastSampleAt = 0;
     let output = '';
     let lastChunkAt = Date.now();
+    let verified = null;
+    let verifyInfo = null;
+    // Sandbox terminal log: the agent's activity as terminal lines
+    // ({kind:'cmd'|'out'|'reasoning', text}) — shown in the Answer panel
+    // while the panel runs.
+    const term = [];
 
-    // Consume the stream inside a promise. The AI SDK's `for await` loop
-    // cannot be interrupted from the outside, so the stream is ALSO raced
-    // against watchdog promises below — a provider that stops responding
+    // Consume the harness event stream inside a promise. The stream is ALSO
+    // raced against watchdog promises below — a provider that stops responding
     // must never hang the battle forever.
     const consume = (async () => {
-      const model = provider.create(key);
-      // AI SDK v4: streamText() returns a result object (textStream iterable +
-      // usage promise) — it is NOT a promise, so consume it directly.
-      // The agent gets tools to explore and EDIT its own isolated sandbox copy
-      // of the repo (maxSteps lets it iterate: read → change → verify).
-      const result = streamText({
-        model: model(panel.model),
-        system: systemPrompt(battleRef.current),
-        prompt: `${context}\n\nTASK:\n${task.prompt}\n\nYou are working inside an isolated copy of the repository. Use the provided tools (list_files, read_file, write_file) to explore the real code and make the changes the task asks for. When you write code, ALSO explain in your final answer what you changed and why.`,
-        temperature: 0.3,
-        tools: agentTools(panel.id),
-        maxSteps: 12,
-        maxRetries: 0,
-        abortSignal: controller.signal,
-      });
-      const { textStream, usage } = result;
-      for await (const chunk of textStream) {
-        output += chunk;
-        lastChunkAt = Date.now();
-        if (firstTokenAt === null) {
-          firstTokenAt = Date.now();
-          if (onLive) onLive({ ttftMs: firstTokenAt - startedAt });
+      const mode = task.mode === 'plan' ? 'plan' : 'act';
+      const done = await runAgent(
+        {
+          panel: panel.id,
+          provider: panel.provider,
+          model: panel.model,
+          apiKey: key || '',
+          mode,
+          task: task.prompt,
+          context,
+          system: systemPrompt(battleRef.current),
+          // Act tasks verify the project still runs (the harness asks the
+          // agent to start it); plan tasks are plans only — nothing to run.
+          verify: mode === 'act',
+          maxSteps: 12,
+        },
+        {
+          signal: controller.signal,
+          onEvent: (evt) => {
+            if (evt.type === 'delta') {
+              output += evt.text || '';
+              lastChunkAt = Date.now();
+              if (firstTokenAt === null) {
+                firstTokenAt = Date.now();
+                if (onLive) onLive({ ttftMs: firstTokenAt - startedAt });
+              }
+              const now = Date.now();
+              if (now - lastSampleAt > 120 || samples.length === 0) {
+                lastSampleAt = now;
+                samples.push({ tMs: now - startedAt, completionTokens: estTokens(output) });
+              }
+              onDelta(output);
+            } else if (evt.type === 'verify') {
+              verified = evt.ok === true;
+              verifyInfo = {
+                command: evt.command || '',
+                output: evt.output || '',
+                exitCode: evt.exitCode ?? null,
+              };
+            } else if (evt.type === 'cmd' || evt.type === 'out' || evt.type === 'reasoning') {
+              term.push({ kind: evt.type, text: evt.text || '' });
+              if (onLive) onLive({ term: [...term] });
+            }
+          },
         }
-        const now = Date.now();
-        if (now - lastSampleAt > 120 || samples.length === 0) {
-          lastSampleAt = now;
-          samples.push({ tMs: now - startedAt, completionTokens: estTokens(output) });
-        }
-        onDelta(output);
-      }
-      const u = await usage;
+      );
       const doneAt = Date.now();
-      const elapsed = doneAt - startedAt;
-      const success = checkSuccess(output, task);
-      // Keep missing usage as null (not 0) so the UI shows '—' instead of
-      // fake '0 tokens' / '$0' values when the provider reports nothing.
-      const inputTokens = u?.inputTokens != null ? u.inputTokens : null;
-      const outputTokens = u?.outputTokens != null ? u.outputTokens : null;
-      const cost =
-        inputTokens != null || outputTokens != null
-          ? estimateCost(panel.model, inputTokens ?? 0, outputTokens ?? 0)
-          : null;
+      const elapsed = done.timeMs != null ? done.timeMs : doneAt - startedAt;
+      if (typeof done.verified === 'boolean') verified = done.verified;
+      const answerOk = checkSuccess(output, task);
+      // Act tasks fail the benchmark when the project no longer runs; plan
+      // tasks are judged on the answer alone.
+      const success = mode === 'act' ? answerOk && verified === true : answerOk;
       return {
         status: 'done',
         output,
         timeMs: elapsed,
         ttftMs: firstTokenAt ? firstTokenAt - startedAt : elapsed,
         genMs: firstTokenAt ? doneAt - firstTokenAt : 0,
-        inputTokens,
-        outputTokens,
-        cost,
+        // Token usage/cost are reported by the provider inside the sandbox
+        // harness, not streamed back — leave them null so the UI shows '—'.
+        inputTokens: null,
+        outputTokens: null,
+        cost: null,
         success,
+        verified,
+        verifyCommand: verifyInfo?.command || '',
+        verifyOutput: verifyInfo?.output || '',
+        verifyExitCode: verifyInfo?.exitCode ?? null,
+        steps: done.steps != null ? done.steps : null,
         samples,
+        term,
       };
     })();
 
@@ -335,6 +302,16 @@ export default function BattlePage({ onBack }) {
   async function startBattle() {
     if (!repo || battleStatus === 'running') return;
     stoppedRef.current = false;
+    const runId = battle?.id || battle?.repo?.battleId || String(Date.now());
+    upsertHistory({
+      id: runId,
+      battleId: battle?.repo?.battleId || runId,
+      ts: Date.now(),
+      repoName: battle?.repo?.name,
+      repoSource: battle?.repo?.source,
+      taskCount: tasks.length,
+      status: 'running',
+    });
     const panelInit = Object.fromEntries(panels.map((p) => [p.id, { status: 'pending' }]));
     // Track the final results locally as well — the React state updates are
     // batched, so reading state right after the loop would miss the last
@@ -350,7 +327,7 @@ export default function BattlePage({ onBack }) {
         panels.map(async (panel) => {
           if (stoppedRef.current) return;
           const context = panel.acc ? repo.accContext : repo.baseContext;
-          const live = { status: 'running', output: '', _startedAt: Date.now() };
+          const live = { status: 'running', output: '', term: [], _startedAt: Date.now() };
           next[i].panels[panel.id] = live;
           setPanelResult(i, panel.id, live);
           try {
@@ -390,6 +367,10 @@ export default function BattlePage({ onBack }) {
     abortRef.current.clear();
     for (const release of stopHandlersRef.current) release();
     stopHandlersRef.current.clear();
+    const id = battle?.id || battle?.repo?.battleId;
+    if (id) upsertHistory({ id, status: 'stopped' });
+    // A stopped battle must not auto-restart on the next visit to /battle.
+    localStorage.removeItem(PENDING_BATTLE_KEY);
     setBattleStatus('stopped');
   }
 
@@ -397,7 +378,6 @@ export default function BattlePage({ onBack }) {
     if (!final.length || !repo) return;
     const done = final.filter((r) => r.panels.acc?.status === 'done' || r.panels.plain?.status === 'done');
     if (!done.length) return;
-    const history = loadHistory();
     const accWins = done.filter((r) => {
       const a = r.panels.acc;
       const p = r.panels.plain;
@@ -405,8 +385,8 @@ export default function BattlePage({ onBack }) {
       if (a.success !== p.success) return a.success;
       return a.timeMs < p.timeMs;
     }).length;
-    const id = String(Date.now());
-    history.unshift({
+    const id = battle?.id || battle?.repo?.battleId || String(Date.now());
+    upsertHistory({
       id,
       battleId: repo.battleId || id, // sandbox + report are keyed by this on the server
       ts: Date.now(),
@@ -415,8 +395,8 @@ export default function BattlePage({ onBack }) {
       taskCount: final.length,
       accWins,
       verdict: accWins > final.length / 2 ? 'ACC ahead' : accWins < final.length / 2 ? 'no-ACC ahead' : 'tie',
+      status: 'done',
     });
-    saveHistory(history);
   }
 
   /* --------------------------- summary ---------------------------------- */
@@ -724,7 +704,16 @@ export default function BattlePage({ onBack }) {
                                   .map(([k]) => k)
                                   .join(', ');
                                 return (
-                                  <span key={pid} className={pid === 'acc' ? 'text-[var(--color-accent)]' : 'text-[var(--color-ink-dim)]'}>
+                                  <span
+                                    key={pid}
+                                    className={
+                                      blind.enabled && !blind.revealed
+                                        ? 'text-[var(--color-ink-dim)]'
+                                        : pid === 'acc'
+                                          ? 'text-[var(--color-accent)]'
+                                          : 'text-[var(--color-ink-dim)]'
+                                    }
+                                  >
                                     {blind.enabled && !blind.revealed ? aliasFor(pid) : pid === 'acc' ? 'ACC' : 'no-ACC'} · {labels}
                                   </span>
                                 );
@@ -742,7 +731,7 @@ export default function BattlePage({ onBack }) {
                         context={p.acc ? repo?.accContext : repo?.baseContext}
                         viewMode={viewFor(i, p.id)}
                         onViewMode={(mode) => setCardView(i, p.id, mode)}
-                        blind={blind.enabled && !blind.revealed}
+                        blind={blind}
                         alias={aliasFor(p.id)}
                         best={winners.get(p.id)}
                         repoName={repo?.name}
@@ -759,7 +748,7 @@ export default function BattlePage({ onBack }) {
 
           {/* ============================ SUMMARY ============================ */}
           {summary && (
-            <section id="battle-summary" className="mb-6 overflow-hidden">
+            <section id="battle-summary" className="aba-fade-in mb-6 overflow-hidden">
               <header className="flex flex-wrap items-center gap-3 border-b border-[var(--color-line)] px-4 py-3.5 sm:px-5">
                 <Icon name="trophy" className="size-4 text-[var(--color-accent)]" />
                 <div>
