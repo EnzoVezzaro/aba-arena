@@ -11,6 +11,9 @@ ui/dist/
 # OS
 .DS_Store
 
+# Secrets — never commit .env (client secrets, tokens)
+.env
+
 # Runtime sandbox artifacts
 ~/.aba-sandbox/
 reports/
