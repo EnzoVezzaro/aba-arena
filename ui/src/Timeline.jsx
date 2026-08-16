@@ -10,15 +10,24 @@ const PAD_B = 18;
 /**
  * Tokens-vs-time timeline for one task, one line per panel
  * (adapted from isbetter.ai's battle timeline).
+ * `labelFor(panelId)` overrides the default ACC/no-ACC label — blind mode
+ * passes it so the aliases (Panel A / Panel B) are used instead.
  */
-export default function Timeline({ panels, panelsResult }) {
+export default function Timeline({ panels, panelsResult, labelFor }) {
   const series = panels
     .map((p) => {
       const r = panelsResult[p.id];
+      // Blind mode: color the line by position (alias), not by ACC identity —
+      // the accent color must not tell you which panel runs the framework.
+      const color = labelFor
+        ? ['var(--color-accent, oklch(0.58 0.22 355))', 'var(--color-ink-dim, oklch(0.42 0.014 355))'][panels.indexOf(p) % 2]
+        : p.acc
+          ? 'var(--color-accent, oklch(0.58 0.22 355))'
+          : 'var(--color-ink-dim, oklch(0.42 0.014 355))';
       return {
         id: p.id,
-        label: p.acc ? 'ACC' : 'no-ACC',
-        color: p.acc ? 'var(--color-accent, oklch(0.58 0.22 355))' : 'var(--color-ink-dim, oklch(0.42 0.014 355))',
+        label: labelFor ? labelFor(p.id) : p.acc ? 'ACC' : 'no-ACC',
+        color,
         samples: (r && Array.isArray(r.samples) ? r.samples : []).filter((s) => s.tMs > 0),
       };
     })

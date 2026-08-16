@@ -157,22 +157,29 @@ export function dotColor(state) {
 
 export function ResultCard({ panel, result, context, viewMode, onViewMode, blind, alias, best, repoName }) {
   const provider = getProvider(panel.provider);
-  const name = blind ? alias : `${provider.label} · ${panel.model}`;
+  // Hidden identity = blind is enabled and not yet revealed.
+  const hidden = blind?.enabled && !blind?.revealed;
+  const name = hidden ? alias : `${provider.label} · ${panel.model}`;
   const state = result?.status || 'pending';
   const answer = result?.output ? extractAnswer(result.output) : '';
   const elapsed = state === 'running' ? Date.now() - (result._startedAt || Date.now()) : result?.timeMs || 0;
+  // In blind mode the ACC identity stays hidden: no accent highlight on the
+  // ACC card, and the sandbox Code view (which would expose the .acc install)
+  // is locked until the battle is revealed.
+  const locked = !!hidden;
+  const effectiveView = locked ? 'answer' : viewMode;
 
   return (
     <article
       className={`result-card flex flex-col overflow-hidden rounded-2xl border bg-[var(--color-panel)] ${
-        panel.acc ? 'border-[var(--color-accent)]/45 shadow-[0_0_0_1px_var(--color-accent)/15,0_10px_30px_-18px_var(--color-accent)/35]' : 'border-[var(--color-line)]'
+        !locked && panel.acc ? 'border-[var(--color-accent)]/45 shadow-[0_0_0_1px_var(--color-accent)/15,0_10px_30px_-18px_var(--color-accent)/35]' : 'border-[var(--color-line)]'
       }`}
     >
       {/* header */}
       <div className="flex min-h-12 items-center gap-2 border-b border-[var(--color-line)] px-3.5 py-2.5">
         <span className={`size-2 shrink-0 rounded-full ${dotColor(state)}`} aria-hidden="true" />
         <span className="sr-only">{state}</span>
-        {!blind && (
+        {!hidden && (
           <span
             className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 font-pixel text-[9px] uppercase tracking-[0.14em] ${
               panel.acc
@@ -183,7 +190,7 @@ export function ResultCard({ panel, result, context, viewMode, onViewMode, blind
             {panel.acc ? 'ACC' : 'no-ACC'}
           </span>
         )}
-        <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-[var(--color-ink)]" title={blind ? '' : panel.model}>
+        <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-[var(--color-ink)]" title={hidden ? '' : panel.model}>
           {name}
         </span>
         <button
@@ -227,26 +234,28 @@ export function ResultCard({ panel, result, context, viewMode, onViewMode, blind
           <>
             <div className="flex items-center gap-1 border-b border-[var(--color-line)] px-3 py-1.5">
               <button
-                data-on={viewMode === 'answer'}
+                data-on={effectiveView === 'answer'}
                 className="view-tab flex min-h-8 items-center gap-1.5 rounded-lg px-2.5 text-[11px] text-[var(--color-ink-dim)] transition-colors"
                 onClick={() => onViewMode('answer')}
-                aria-selected={viewMode === 'answer'}
+                aria-selected={effectiveView === 'answer'}
               >
                 <Icon name="text" className="size-4" />
                 <span>Answer</span>
               </button>
-              <button
-                data-on={viewMode === 'code'}
-                className="view-tab flex min-h-8 items-center gap-1.5 rounded-lg px-2.5 text-[11px] text-[var(--color-ink-dim)] transition-colors"
-                onClick={() => onViewMode('code')}
-                aria-selected={viewMode === 'code'}
-              >
-                <Icon name="code" className="size-4" />
-                <span>Code</span>
-              </button>
+              {!locked && (
+                <button
+                  data-on={effectiveView === 'code'}
+                  className="view-tab flex min-h-8 items-center gap-1.5 rounded-lg px-2.5 text-[11px] text-[var(--color-ink-dim)] transition-colors"
+                  onClick={() => onViewMode('code')}
+                  aria-selected={effectiveView === 'code'}
+                >
+                  <Icon name="code" className="size-4" />
+                  <span>Code</span>
+                </button>
+              )}
             </div>
             <div className="h-[calc(100%-2.5rem)]">
-              {viewMode === 'code' ? (
+              {effectiveView === 'code' ? (
                 <CodeSandbox panel={panel} repoName={repoName} />
               ) : (
                 <div className="h-full overflow-auto p-3.5 text-[12px] leading-relaxed text-[var(--color-ink-dim)]">
@@ -267,26 +276,28 @@ export function ResultCard({ panel, result, context, viewMode, onViewMode, blind
           <>
             <div className="flex items-center gap-1 border-b border-[var(--color-line)] px-3 py-1.5">
               <button
-                data-on={viewMode === 'answer'}
+                data-on={effectiveView === 'answer'}
                 className="view-tab flex min-h-8 items-center gap-1.5 rounded-lg px-2.5 text-[11px] text-[var(--color-ink-dim)] transition-colors"
                 onClick={() => onViewMode('answer')}
-                aria-selected={viewMode === 'answer'}
+                aria-selected={effectiveView === 'answer'}
               >
                 <Icon name="text" className="size-4" />
                 <span>Answer</span>
               </button>
-              <button
-                data-on={viewMode === 'code'}
-                className={`view-tab flex min-h-8 items-center gap-1.5 rounded-lg px-2.5 text-[11px] text-[var(--color-ink-dim)] transition-colors`}
-                onClick={() => onViewMode('code')}
-                aria-selected={viewMode === 'code'}
-              >
-                <Icon name="code" className="size-4" />
-                <span>Code</span>
-              </button>
+              {!locked && (
+                <button
+                  data-on={effectiveView === 'code'}
+                  className={`view-tab flex min-h-8 items-center gap-1.5 rounded-lg px-2.5 text-[11px] text-[var(--color-ink-dim)] transition-colors`}
+                  onClick={() => onViewMode('code')}
+                  aria-selected={effectiveView === 'code'}
+                >
+                  <Icon name="code" className="size-4" />
+                  <span>Code</span>
+                </button>
+              )}
             </div>
             <div className="h-[calc(100%-2.5rem)]">
-              {viewMode === 'code' ? (
+              {effectiveView === 'code' ? (
                 // Code view = the panel's sandbox: real repository files
                 // (including the agent's edits), browsable live.
                 <CodeSandbox panel={panel} repoName={repoName} />

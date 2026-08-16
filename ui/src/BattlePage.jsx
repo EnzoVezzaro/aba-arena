@@ -19,6 +19,10 @@ import CodeExplorer from './CodeExplorer.jsx';
 // Hard cap per panel — provider blocks (rate limits, quota) must not hang the
 // battle forever. The panel is aborted and reported as failed, results show.
 const PANEL_TIMEOUT_MS = 120000;
+// Inactivity cap — if a panel streams nothing for this long (stuck provider,
+// half-open connection, tool-only response that never resumes), it is aborted
+// so the battle moves on instead of appearing to run forever.
+const IDLE_TIMEOUT_MS = 45000;
 
 const systemPrompt = (battle) =>
   battle?.systemPrompt ||
@@ -52,16 +56,25 @@ export default function BattlePage({ onBack }) {
   // Per-card view overrides — each sandbox's Code/Answer buttons only affect
   // that card. Key: `${taskIndex}:${panelId}` → 'answer' | 'code'.
   const [cardViews, setCardViews] = useState({});
-  const [blind, setBlind] = useState({ enabled: false, order: null, revealed: true });
+  // Blind mode is ON by default: the two panels are shown under shuffled
+  // aliases (Panel A / Panel B) so the battle can be judged without knowing
+  // which side runs the ACC framework. Reveal to disclose.
+  const [blind, setBlind] = useState(() => {
+    const pending = loadPendingBattle();
+    const ids = (pending?.panels || []).map((p) => p.id);
+    return { enabled: true, order: shuffle(ids.length ? ids : ['acc', 'plain']), revealed: false };
+  });
   const [savedReport, setSavedReport] = useState('');
   const [explorerPanel, setExplorerPanel] = useState(null); // null | panel object
 
   const abortRef = useRef(new Set());
-  const resultsRef = useRef(results);
-  resultsRef.current = results;
   const battleRef = useRef(battle);
   battleRef.current = battle;
   const startedRef = useRef(false);
+  const stoppedRef = useRef(false);
+  // Resolvers that reject in-flight panels when the battle is stopped — a
+  // Stop click must release the panels immediately, not wait on the provider.
+  const stopHandlersRef = useRef(new Set());
 
   const panels = battle?.panels || [];
   const tasks = battle?.tasks || [];
@@ -155,13 +168,14 @@ export default function BattlePage({ onBack }) {
     let firstTokenAt = null;
     const samples = [];
     let lastSampleAt = 0;
+    let output = '';
+    let lastChunkAt = Date.now();
 
-    // Provider blocks (rate limits, quota, outages) can take forever with the
-    // SDK's default 2 retries + backoff. Disable retries entirely and cap each
-    // panel at PANEL_TIMEOUT_MS — the battle moves on and shows the result
-    // (success or failure) instead of hanging on a blocked panel.
-    const timeout = setTimeout(() => controller.abort(), PANEL_TIMEOUT_MS);
-    try {
+    // Consume the stream inside a promise. The AI SDK's `for await` loop
+    // cannot be interrupted from the outside, so the stream is ALSO raced
+    // against watchdog promises below — a provider that stops responding
+    // must never hang the battle forever.
+    const consume = (async () => {
       const model = provider.create(key);
       // AI SDK v4: streamText() returns a result object (textStream iterable +
       // usage promise) — it is NOT a promise, so consume it directly.
@@ -178,9 +192,9 @@ export default function BattlePage({ onBack }) {
         abortSignal: controller.signal,
       });
       const { textStream, usage } = result;
-      let output = '';
       for await (const chunk of textStream) {
         output += chunk;
+        lastChunkAt = Date.now();
         if (firstTokenAt === null) {
           firstTokenAt = Date.now();
           if (onLive) onLive({ ttftMs: firstTokenAt - startedAt });
@@ -216,9 +230,57 @@ export default function BattlePage({ onBack }) {
         success,
         samples,
       };
+    })();
+
+    // Reject the panel immediately when the battle is stopped.
+    let release;
+    const stopped = new Promise((_, reject) => {
+      release = () => reject(new Error('battle stopped'));
+    });
+    stopHandlersRef.current.add(release);
+
+    // Hard deadline: the whole panel (all agent steps) must finish in time.
+    let hardTimer;
+    const hardLimit = new Promise((_, reject) => {
+      hardTimer = setTimeout(() => {
+        try {
+          controller.abort();
+        } catch {
+          // ignore
+        }
+        reject(new Error(`Timed out after ${Math.round(PANEL_TIMEOUT_MS / 1000)}s — the provider did not respond.`));
+      }, PANEL_TIMEOUT_MS);
+    });
+
+    // Inactivity watchdog: no new chunk for a while means the provider is
+    // stuck (or the agent loop stalled) — abort instead of waiting forever.
+    let idleTimer;
+    const idleLimit = new Promise((_, reject) => {
+      const check = () => {
+        if (Date.now() - lastChunkAt >= IDLE_TIMEOUT_MS) {
+          try {
+            controller.abort();
+          } catch {
+            // ignore
+          }
+          reject(new Error(`No response for ${Math.round(IDLE_TIMEOUT_MS / 1000)}s — the provider stopped streaming.`));
+          return;
+        }
+        idleTimer = setTimeout(check, IDLE_TIMEOUT_MS);
+      };
+      check();
+    });
+
+    try {
+      return await Promise.race([consume, hardLimit, idleLimit, stopped]);
     } finally {
-      clearTimeout(timeout);
+      clearTimeout(hardTimer);
+      clearTimeout(idleTimer);
+      stopHandlersRef.current.delete(release);
       abortRef.current.delete(controller);
+      // The abandoned consume loop (if a watchdog won the race) may still
+      // reject later — swallow it so it never surfaces as an unhandled error.
+      consume.catch(() => {});
     }
   }
 
@@ -232,7 +294,7 @@ export default function BattlePage({ onBack }) {
 
   function toggleBlind() {
     setBlind((prev) => {
-      if (prev.enabled) return { enabled: false, order: null, revealed: true };
+      if (prev.enabled) return { ...prev, enabled: false, revealed: true };
       const order = prev.order || shuffle(panels.map((p) => p.id));
       return { enabled: true, order, revealed: false };
     });
@@ -253,6 +315,12 @@ export default function BattlePage({ onBack }) {
     return `Panel ${String.fromCharCode(65 + Math.max(0, idx))}`;
   };
 
+  // Blind mode is active until revealed: the ACC/no-ACC identity stays hidden
+  // everywhere (card headers, winners, timeline, summary, file explorers).
+  const blinded = blind.enabled && !blind.revealed;
+  const panelLabel = (panelId) =>
+    blinded ? aliasFor(panelId) : panelId === 'acc' ? 'ACC' : 'no-ACC';
+
   // Effective view for one card: its own override, or the toolbar default.
   const viewFor = (taskIndex, panelId) => cardViews[`${taskIndex}:${panelId}`] || viewMode;
   // A card's own Code/Answer buttons only affect that card.
@@ -266,7 +334,13 @@ export default function BattlePage({ onBack }) {
 
   async function startBattle() {
     if (!repo || battleStatus === 'running') return;
-    setResults(tasks.map((t) => ({ task: t, panels: { acc: { status: 'pending' }, plain: { status: 'pending' } } })));
+    stoppedRef.current = false;
+    const panelInit = Object.fromEntries(panels.map((p) => [p.id, { status: 'pending' }]));
+    // Track the final results locally as well — the React state updates are
+    // batched, so reading state right after the loop would miss the last
+    // task's finished panels when persisting history.
+    const next = tasks.map((t) => ({ task: t, panels: { ...panelInit } }));
+    setResults(next);
     setCardViews({});
     setBattleStatus('running');
 
@@ -274,39 +348,52 @@ export default function BattlePage({ onBack }) {
       const task = tasks[i];
       await Promise.all(
         panels.map(async (panel) => {
+          if (stoppedRef.current) return;
           const context = panel.acc ? repo.accContext : repo.baseContext;
-          setPanelResult(i, panel.id, { status: 'running', output: '', _startedAt: Date.now() });
+          const live = { status: 'running', output: '', _startedAt: Date.now() };
+          next[i].panels[panel.id] = live;
+          setPanelResult(i, panel.id, live);
           try {
             const out = await runPanel(
               panel,
               context,
               task,
-              (output) => setPanelResult(i, panel.id, { status: 'running', output }),
-              (live) => setPanelResult(i, panel.id, live)
+              (output) => {
+                live.output = output;
+                setPanelResult(i, panel.id, { status: 'running', output });
+              },
+              (patch) => {
+                Object.assign(live, patch);
+                setPanelResult(i, panel.id, patch);
+              }
             );
+            next[i].panels[panel.id] = out;
             setPanelResult(i, panel.id, out);
           } catch (err) {
-            const aborted = err?.name === 'AbortError' || /aborted|timed out|timeout/i.test(String(err?.message || ''));
-            setPanelResult(i, panel.id, {
-              status: 'error',
-              error: aborted ? `Timed out after ${Math.round(PANEL_TIMEOUT_MS / 1000)}s — the provider did not respond.` : err.message,
-            });
+            const msg = String(err?.message || err?.name || 'failed');
+            const aborted = err?.name === 'AbortError' || /aborted|timed out|timeout|no response|stopped/i.test(msg);
+            const errResult = { status: 'error', error: aborted ? msg : `Provider error: ${msg}` };
+            next[i].panels[panel.id] = errResult;
+            setPanelResult(i, panel.id, errResult);
           }
         })
       );
+      if (stoppedRef.current) break;
     }
+    if (!stoppedRef.current) persistBattle(next);
     setBattleStatus((prev) => (prev === 'stopped' ? 'stopped' : 'done'));
-    persistBattle();
   }
 
   function stopBattle() {
+    stoppedRef.current = true;
     for (const c of abortRef.current) c.abort();
     abortRef.current.clear();
+    for (const release of stopHandlersRef.current) release();
+    stopHandlersRef.current.clear();
     setBattleStatus('stopped');
   }
 
-  function persistBattle() {
-    const final = resultsRef.current;
+  function persistBattle(final) {
     if (!final.length || !repo) return;
     const done = final.filter((r) => r.panels.acc?.status === 'done' || r.panels.plain?.status === 'done');
     if (!done.length) return;
@@ -464,22 +551,26 @@ export default function BattlePage({ onBack }) {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <button
-              onClick={() => setExplorerPanel(panels.find((p) => p.acc) || panels[0])}
-              className="control-surface flex min-h-9 items-center gap-2 px-3 text-[11px]"
-              title="Browse the ACC panel's sandbox files"
-            >
-              <Icon name="code" className="size-4 text-[var(--color-accent)]" />
-              <span className="hidden sm:inline">ACC files</span>
-            </button>
-            <button
-              onClick={() => setExplorerPanel(panels.find((p) => !p.acc) || panels[1])}
-              className="control-surface flex min-h-9 items-center gap-2 px-3 text-[11px]"
-              title="Browse the no-ACC panel's sandbox files"
-            >
-              <Icon name="folder" className="size-4" />
-              <span className="hidden sm:inline">plain files</span>
-            </button>
+            {!blinded && (
+              <>
+                <button
+                  onClick={() => setExplorerPanel(panels.find((p) => p.acc) || panels[0])}
+                  className="control-surface flex min-h-9 items-center gap-2 px-3 text-[11px]"
+                  title="Browse the ACC panel's sandbox files"
+                >
+                  <Icon name="code" className="size-4 text-[var(--color-accent)]" />
+                  <span className="hidden sm:inline">ACC files</span>
+                </button>
+                <button
+                  onClick={() => setExplorerPanel(panels.find((p) => !p.acc) || panels[1])}
+                  className="control-surface flex min-h-9 items-center gap-2 px-3 text-[11px]"
+                  title="Browse the no-ACC panel's sandbox files"
+                >
+                  <Icon name="folder" className="size-4" />
+                  <span className="hidden sm:inline">plain files</span>
+                </button>
+              </>
+            )}
             <span
               className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[10px] uppercase tracking-[0.14em] ${
                 battleStatus === 'running'
@@ -658,7 +749,7 @@ export default function BattlePage({ onBack }) {
                       />
                     ))}
                     <div className="col-span-full">
-                      <Timeline panels={displayOrder} panelsResult={r.panels} />
+                      <Timeline panels={displayOrder} panelsResult={r.panels} labelFor={blinded ? panelLabel : null} />
                     </div>
                   </React.Fragment>
                 );
@@ -673,7 +764,9 @@ export default function BattlePage({ onBack }) {
                 <Icon name="trophy" className="size-4 text-[var(--color-accent)]" />
                 <div>
                   <h2 className="font-pixel text-[11px] uppercase tracking-[0.14em] text-[var(--color-ink)]">Battle analysis</h2>
-                  <p className="mt-0.5 text-[10px] text-[var(--color-ink-faint)]">Heuristic comparison — ACC vs no-ACC, normalized side by side</p>
+                  <p className="mt-0.5 text-[10px] text-[var(--color-ink-faint)]">
+                    Heuristic comparison — {blinded ? 'blinded panels' : 'ACC vs no-ACC'}, normalized side by side
+                  </p>
                 </div>
               </header>
               <div className="scroll-affordance">
@@ -682,8 +775,8 @@ export default function BattlePage({ onBack }) {
                     <thead>
                       <tr className="border-b border-[var(--color-line)] text-[10px] uppercase tracking-[0.1em] text-[var(--color-ink-faint)]">
                         <th className="px-4 py-2.5 font-normal">Metric</th>
-                        <th className="px-4 py-2.5 font-normal">ACC</th>
-                        <th className="px-4 py-2.5 font-normal">no-ACC</th>
+                        <th className="px-4 py-2.5 font-normal">{panelLabel('acc')}</th>
+                        <th className="px-4 py-2.5 font-normal">{panelLabel('plain')}</th>
                         <th className="px-4 py-2.5 text-right font-normal">Tasks</th>
                       </tr>
                     </thead>
@@ -726,9 +819,9 @@ export default function BattlePage({ onBack }) {
                           >
                             <Icon name="trophy" className="size-3.5" />
                             {summary.accWins > summary.total / 2
-                              ? `ACC ahead — ${summary.accWins}/${summary.total} tasks better`
+                              ? `${panelLabel('acc')} ahead — ${summary.accWins}/${summary.total} tasks better`
                               : summary.accWins < summary.total / 2
-                                ? `no-ACC ahead — ${summary.total - summary.accWins}/${summary.total} tasks better`
+                                ? `${panelLabel('plain')} ahead — ${summary.total - summary.accWins}/${summary.total} tasks better`
                                 : `tie — ${summary.accWins}/${summary.total}`}
                           </span>
                           <button onClick={handleSaveReport} className="ml-3 control-surface px-3 py-1.5 text-[11px]">
@@ -751,12 +844,15 @@ export default function BattlePage({ onBack }) {
         <footer className="mt-auto flex flex-col items-start gap-3 border-t border-[var(--color-line)] py-5 text-[11px] text-[var(--color-ink-faint)] sm:flex-row sm:items-center sm:justify-between">
           <span className="flex items-center gap-1.5">
             <span className="font-pixel text-[13px] font-semibold text-[var(--color-accent)]">acc</span>
-            <span>Agent Code Context · Battle Arena — battle UI adapted from</span>
-            <Icon name="heart" className="size-3.5 text-[var(--color-accent)]" />
-            <a href="https://github.com/midudev/isbetter.ai" target="_blank" rel="noopener" className="text-[var(--color-ink-dim)] underline-offset-2 transition-colors hover:text-[var(--color-ink)] hover:underline">
-              isbetter.ai
+            <span>Agent Code Context · Battle Arena —</span>
+            <a
+              href="https://EnzoVezzaro.github.io/agents-code-context/"
+              target="_blank"
+              rel="noopener"
+              className="text-[var(--color-ink-dim)] underline-offset-2 transition-colors hover:text-[var(--color-ink)] hover:underline"
+            >
+              landing page
             </a>
-            <span>by midudev</span>
           </span>
           <div className="flex flex-wrap items-center gap-x-4 gap-y-2 sm:justify-end">
             <a href="https://github.com/EnzoVezzaro/agents-code-context" target="_blank" rel="noopener" className="underline-offset-2 transition-colors hover:text-[var(--color-ink-dim)] hover:underline">

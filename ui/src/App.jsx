@@ -575,12 +575,15 @@ export default function App() {
         <footer className="mt-auto flex flex-col items-start gap-3 border-t border-[var(--color-line)] py-5 text-[11px] text-[var(--color-ink-faint)] sm:flex-row sm:items-center sm:justify-between">
           <span className="flex items-center gap-1.5">
             <span className="font-pixel text-[13px] font-semibold text-[var(--color-accent)]">acc</span>
-            <span>Agent Code Context · Battle Arena — battle UI adapted from</span>
-            <Icon name="heart" className="size-3.5 text-[var(--color-accent)]" />
-            <a href="https://github.com/midudev/isbetter.ai" target="_blank" rel="noopener" className="text-[var(--color-ink-dim)] underline-offset-2 transition-colors hover:text-[var(--color-ink)] hover:underline">
-              isbetter.ai
+            <span>Agent Code Context · Battle Arena —</span>
+            <a
+              href="https://EnzoVezzaro.github.io/agents-code-context/"
+              target="_blank"
+              rel="noopener"
+              className="text-[var(--color-ink-dim)] underline-offset-2 transition-colors hover:text-[var(--color-ink)] hover:underline"
+            >
+              landing page
             </a>
-            <span>by midudev</span>
           </span>
           <div className="flex flex-wrap items-center gap-x-4 gap-y-2 sm:justify-end">
             <a href="https://github.com/EnzoVezzaro/agents-code-context" target="_blank" rel="noopener" className="underline-offset-2 transition-colors hover:text-[var(--color-ink-dim)] hover:underline">
