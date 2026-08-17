@@ -293,6 +293,7 @@ async function buildAccContext(snapshotDir, info, baseContext, onProgress) {
     steps.push(s);
     if (onProgress) onProgress(s);
   };
+  const accfill = require('./accfill.cjs');
 
   // Step 3 — acc init: scaffold ACC structure only if it isn't already there
   // (never rewrites an existing ACC repo — init is additive by contract).
@@ -310,6 +311,71 @@ async function buildAccContext(snapshotDir, info, baseContext, onProgress) {
     emit({ step: 3, label: 'acc init', ok: true, detail: 'already initialized (.acc/ present)' });
   }
 
+  // acc init leaves .acc/config/workflows/ EMPTY — the docs define it as the
+  // "reproducible procedures (feature, release, etc.)" folder. Scaffold the
+  // standard generic workflow set so the control plane is complete; additive
+  // only — a repo's own workflow files are never overwritten.
+  const workflowsSrc = path.join(__dirname, 'acc-config', 'workflows');
+  const workflowsDir = path.join(accDir, 'config', 'workflows');
+  let workflowTemplates = [];
+  try {
+    workflowTemplates = fs.readdirSync(workflowsSrc).filter((f) => f.endsWith('.md')).sort();
+  } catch {
+    // templates not shipped — skip
+  }
+  fs.mkdirSync(workflowsDir, { recursive: true });
+  let workflowsCreated = 0;
+  for (const f of workflowTemplates) {
+    const target = path.join(workflowsDir, f);
+    if (fs.existsSync(target)) continue;
+    try {
+      fs.copyFileSync(path.join(workflowsSrc, f), target);
+      workflowsCreated++;
+    } catch {
+      // best effort — never let a copy failure block the load
+    }
+  }
+  if (workflowTemplates.length > 0) {
+    emit({
+      step: 3,
+      label: 'acc config (workflows)',
+      ok: true,
+      detail: workflowsCreated === 0
+        ? 'standard workflows already present'
+        : `scaffolded ${workflowsCreated} standard workflow${workflowsCreated === 1 ? '' : 's'} (feature, bugfix, refactor, release, …)`,
+    });
+  }
+
+  // acc config (settings + agents + standards) — acc init's config.yaml only
+  // carries schema_version and agents/standards/ are empty. Generate the FULL
+  // project-aware control plane: every setting the framework reads (language
+  // analyzers for the repo's actual languages, ignore list from its build
+  // noise), a default agent profile, and the standards set. The minimal
+  // config.yaml is replaced only when ABA just scaffolded it; a repo's own
+  // config is never overwritten.
+  const accsetup = require('./accsetup.cjs');
+  const repoName = info.sourceType === 'github'
+    ? ((info.sourceUrl || '').split('/').pop() || 'repo')
+    : path.basename(snapshotDir);
+  const setup = accsetup.writeAccConfig(snapshotDir, repoName, { overwriteConfig: needsInit });
+  emit({
+    step: 3,
+    label: 'acc config (settings)',
+    ok: true,
+    detail: setup.config
+      ? `full config.yaml — ${setup.languages.length} language analyzer${setup.languages.length === 1 ? '' : 's'} (${setup.languages.join(', ') || 'defaults'}), ignore: ${setup.ignore.join(', ')}`
+      : `repo config.yaml kept (already configured) — ${setup.languages.length} language analyzer${setup.languages.length === 1 ? '' : 's'} detected`,
+  });
+  emit({
+    step: 3,
+    label: 'acc config (agents + standards)',
+    ok: true,
+    detail: [
+      setup.agents.length > 0 ? `agents: wrote ${setup.agents.join(', ')}` : 'agents: profile present',
+      setup.standards.length > 0 ? `standards: wrote ${setup.standards.join(', ')}` : 'standards: present',
+    ].join(' · '),
+  });
+
   // Step 4 — acc build: create the missing AGENTS.md contracts (+ initial
   // .acc-memory.md records) so the ACC panel works against a documented
   // project, not just a scaffold. Additive and idempotent by contract.
@@ -323,6 +389,45 @@ async function buildAccContext(snapshotDir, info, baseContext, onProgress) {
       ? `created ${builtContracts} missing AGENTS.md contract${builtContracts === 1 ? '' : 's'}`
       : (build.err || build.out || '').trim().slice(0, 200),
   });
+
+  // The root AGENTS.md is ACC's primary contract, but acc build deliberately
+  // skips the root (it is always a boundary). Scaffold it with acc document
+  // when missing (additive — never rewrites) so the ACC panel is fully
+  // documented; the fill step below completes it.
+  if (!fs.existsSync(path.join(snapshotDir, 'AGENTS.md'))) {
+    const doc = await runAcc(['document', '.', '--apply'], snapshotDir);
+    emit({
+      step: 4,
+      label: 'acc build (root contract)',
+      ok: doc.code === 0,
+      detail: doc.code === 0 ? 'scaffolded root AGENTS.md (acc document)' : (doc.err || doc.out || '').trim().slice(0, 200),
+    });
+  }
+
+  // Folder coverage — acc build only creates contracts for directories with
+  // programming-language source, so a static site's css/, images/, … folders
+  // get skipped. Document every remaining content folder (any file type) so
+  // EACH functionality has its own AGENTS.md contract; the fill step below
+  // completes them with content-derived purposes.
+  const missingDirs = accfill.missingContractDirs(snapshotDir);
+  const coveredDirs = [];
+  for (const dir of missingDirs) {
+    const doc = await runAcc(['document', dir, '--apply'], snapshotDir);
+    if (doc.code === 0) coveredDirs.push(dir);
+  }
+  emit({
+    step: 4,
+    label: 'acc build (folder coverage)',
+    ok: coveredDirs.length === missingDirs.length,
+    detail: missingDirs.length === 0
+      ? 'every content folder already has a contract'
+      : `documented ${coveredDirs.length} of ${missingDirs.length} folder${missingDirs.length === 1 ? '' : 's'} without contracts`,
+  });
+  if (coveredDirs.length !== missingDirs.length) {
+    throw new Error(
+      `ACC folder coverage incomplete — could not document: ${missingDirs.filter((d) => !coveredDirs.includes(d)).join(', ')}`,
+    );
+  }
 
   // Step 5 — acc fill: produce the generic fill directive so the coding
   // agent completes the freshly generated AGENTS.md templates with
@@ -345,6 +450,99 @@ async function buildAccContext(snapshotDir, info, baseContext, onProgress) {
         `(${fillSummary.placeholder_items || 0} placeholder items)`
       : (fill.err || fill.out || '').trim().slice(0, 200),
   });
+
+  // Step 5b — apply the fill. `acc fill` is read-only by design; ABA must
+  // deliver a FULLY documented repo before the battle, so the placeholders
+  // are replaced deterministically (src/accfill.cjs: README/package.json →
+  // Purpose, repo name → Ownership, 'None.' for what cannot be derived).
+  // Re-run acc fill to PROVE every contract is complete before the battle.
+  const draftFiles = (fill.code === 0 && fillResult.files ? fillResult.files : []).filter((f) => f.status === 'draft');
+  let fillApply = { files: 0, items: 0, dirs: [] };
+  if (draftFiles.length > 0) {
+    fillApply = accfill.fillDraftAgentsFiles(snapshotDir, fillResult, repoName);
+  }
+  const fillConfirm = await runAcc(['fill', '--json'], snapshotDir);
+  let fillConfirmSummary = {};
+  let leftoverDrafts = [];
+  try {
+    const parsed = JSON.parse(fillConfirm.out).result || {};
+    fillConfirmSummary = parsed.summary || {};
+    leftoverDrafts = (parsed.files || []).filter((f) => f.status === 'draft').map((f) => f.file);
+  } catch {
+    // non-JSON output — leave the summary empty
+  }
+  const draftAfter = fillConfirmSummary.draft ?? 0;
+  const okFillApply = fillConfirm.code === 0 && draftAfter === 0;
+  emit({
+    step: 5,
+    label: 'acc fill (apply content)',
+    ok: okFillApply,
+    detail: okFillApply
+      ? draftFiles.length === 0
+        ? 'all AGENTS.md already complete — nothing to fill'
+        : `filled ${fillApply.files} file${fillApply.files === 1 ? '' : 's'} ` +
+          `(${fillApply.items} placeholder item${fillApply.items === 1 ? '' : 's'}) — all AGENTS.md complete`
+      : `still draft after fill: ${leftoverDrafts.join(', ') || 'unknown'}`,
+  });
+  if (!okFillApply) {
+    throw new Error(`ACC fill incomplete — the ACC sandbox is not fully compliant: ${leftoverDrafts.join(', ') || 'unknown'}`);
+  }
+
+  // Step 6a — memory records: every AGENTS.md contract needs its own filled
+  // .acc-memory.md alongside it (docs/08), and the memory log should RECORD
+  // the adoption changes. acc build only creates memory for the contracts IT
+  // generates, so freshly documented folders may lack one — create them via
+  // the framework's own `acc memory add` (timestamped entry). Memory is
+  // never written outside the framework's explicit memory subcommands.
+  const missingMemory = accfill.missingMemoryFiles(snapshotDir);
+  const today = new Date().toISOString().slice(0, 10);
+  let memoryCreated = 0;
+  let changesRecorded = 0;
+  // 1. Contracts without a filled memory file → create the initial record.
+  for (const m of missingMemory) {
+    const rec = await runAcc(
+      ['memory', 'add', m.dir === '.' ? '.' : m.dir,
+        `Initial record created by ABA — ${m.dir === '.' ? 'the repository' : m.dir} was bound to the ACC graph on ${today}.`],
+      snapshotDir,
+    );
+    if (rec.code === 0) memoryCreated++;
+  }
+  // 2. Contracts completed by the fill → record the change in their memory.
+  for (const dir of fillApply.dirs || []) {
+    if (missingMemory.some((m) => m.dir === dir)) continue; // just created above
+    const rec = await runAcc(
+      ['memory', 'add', dir === '.' ? '.' : dir,
+        `AGENTS.md contract completed by ABA (${fillApply.items} placeholder items resolved) on ${today}.`],
+      snapshotDir,
+    );
+    if (rec.code === 0) changesRecorded++;
+  }
+  // 3. Root adoption record — the repository was bound to ACC on this load.
+  const rootRec = await runAcc(
+    ['memory', 'add', '.', `Repository adopted to ACC by ABA — init, build, fill, and validation passed on ${today}.`],
+    snapshotDir,
+  );
+  if (rootRec.code === 0) changesRecorded++;
+  const okMemory = missingMemory.length === 0 || memoryCreated === missingMemory.length;
+  const memDetail = [];
+  if (missingMemory.length > 0) {
+    memDetail.push(`created ${memoryCreated} of ${missingMemory.length} missing memory record${missingMemory.length === 1 ? '' : 's'}`);
+  }
+  if (changesRecorded > 0) {
+    memDetail.push(`recorded ${changesRecorded} adoption change${changesRecorded === 1 ? '' : 's'}`);
+  }
+  if (memDetail.length === 0) memDetail.push('every contract has a filled .acc-memory.md');
+  emit({
+    step: 6,
+    label: 'acc memory (records)',
+    ok: okMemory,
+    detail: memDetail.join(' · '),
+  });
+  if (!okMemory) {
+    throw new Error(
+      `ACC memory incomplete — ${missingMemory.length - memoryCreated} contract${missingMemory.length - memoryCreated === 1 ? '' : 's'} lack a filled .acc-memory.md`,
+    );
+  }
 
   // Step 6 — scan/prepare: derive the architecture graph, then the focused
   // agent context that ACC contributes to a coding agent.
@@ -400,6 +598,86 @@ async function buildAccContext(snapshotDir, info, baseContext, onProgress) {
   if (scan && scan.out.trim()) {
     parts.push('## ACC derived context (acc context --depth 1)');
     parts.push('```\n' + truncate(scan.out, 16000) + '\n```');
+  }
+
+  // Step 8 — acc check: validate the ACC panel against the framework's own
+  // rules before the battle. Error-level diagnostics mean the repo is not
+  // ACC-compliant — the battle would benchmark a broken adoption, so the
+  // load fails with the diagnostics instead.
+  const check = await runAcc(['check', '--json', '--exit-zero'], snapshotDir);
+  let checkSummary = {};
+  let checkErrors = [];
+  try {
+    const parsed = JSON.parse(check.out).result || {};
+    checkSummary = parsed.summary || {};
+    checkErrors = (parsed.diagnostics || []).filter((d) => d.severity === 'error');
+  } catch {
+    // non-JSON output — leave the summary empty
+  }
+  const okCheck = check.code === 0 && checkSummary.errors === 0;
+  emit({
+    step: 8,
+    label: 'acc check (validate)',
+    ok: okCheck,
+    detail: okCheck
+      ? `ACC-clean — ${checkSummary.warnings || 0} warning${checkSummary.warnings === 1 ? '' : 's'}, ` +
+        `${checkSummary.infos || 0} info`
+      : `${checkSummary.errors} error${checkSummary.errors === 1 ? '' : 's'}: ` +
+        `${checkErrors.map((d) => `${d.code} ${d.path}`).join(', ')}`,
+  });
+  if (!okCheck) {
+    throw new Error(
+      `ACC sandbox failed validation (${checkSummary.errors} errors): ` +
+        checkErrors.map((d) => `${d.code} ${d.path} — ${d.message}`).join('; '),
+    );
+  }
+
+  // Final gate — verify the ACC documentation is COMPLETE before battle:
+  // config present with every setting, agents/standards/workflows populated,
+  // every content folder contracted, every contract complete, every memory
+  // file filled. If something is missing, repair once (re-run the additive
+  // steps) and re-verify — a repo that cannot be fully documented must not
+  // start a battle.
+  const repairAccDocs = async () => {
+    accsetup.writeAccConfig(snapshotDir, repoName, { overwriteConfig: false });
+    const missingDirs2 = accfill.missingContractDirs(snapshotDir);
+    for (const dir of missingDirs2) await runAcc(['document', dir, '--apply'], snapshotDir);
+    const fill2 = await runAcc(['fill', '--json'], snapshotDir);
+    try {
+      const r2 = JSON.parse(fill2.out).result || {};
+      accfill.fillDraftAgentsFiles(snapshotDir, r2, repoName);
+    } catch {
+      // leave it for the final verify to report
+    }
+    for (const m of accfill.missingMemoryFiles(snapshotDir)) {
+      await runAcc(
+        ['memory', 'add', m.dir === '.' ? '.' : m.dir,
+          `Initial record created by ABA — ${m.dir === '.' ? 'the repository' : m.dir} was bound to the ACC graph on ${today}.`],
+        snapshotDir,
+      );
+    }
+  };
+  let docProblems = await accsetup.verifyAccDocumented(snapshotDir, runAcc);
+  if (docProblems.length > 0) {
+    emit({
+      step: 8,
+      label: 'acc verify (repair)',
+      ok: true,
+      detail: `repairing ${docProblems.length} gap${docProblems.length === 1 ? '' : 's'}: ${docProblems.join('; ')}`,
+    });
+    await repairAccDocs();
+    docProblems = await accsetup.verifyAccDocumented(snapshotDir, runAcc);
+  }
+  emit({
+    step: 8,
+    label: 'acc verify (documentation)',
+    ok: docProblems.length === 0,
+    detail: docProblems.length === 0
+      ? 'all ACC files present, documented, and compliant'
+      : docProblems.join('; '),
+  });
+  if (docProblems.length > 0) {
+    throw new Error(`ACC documentation incomplete — the ACC sandbox is not fully documented: ${docProblems.join('; ')}`);
   }
 
   return { context: truncate(parts.join('\n\n'), MAX_CONTEXT_BYTES), steps };

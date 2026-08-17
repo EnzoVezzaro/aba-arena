@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { githubMe, githubRepos } from './api.js';
 import { PROVIDERS, getProvider, loadKeys, saveKey, isFreeModel, modelIdList, modelTools } from './providers.js';
@@ -1257,9 +1257,10 @@ export function KeyModal({ open, onClose, onSaved, freebuffRunning }) {
 /* History drawer (isbetter.ai history drawer)                               */
 /* ------------------------------------------------------------------------ */
 
-export function HistoryDrawer({ open, history, onClose, onClear, onDelete, onStop, onResume, onOpen }) {
+export function HistoryDrawer({ open, history, onClose, onClear, onDelete, onStop, onResume, onOpen, onImport }) {
   const [deleting, setDeleting] = useState(null); // history id currently being removed
   const { mounted, visible } = useOverlay(open, 240);
+  const fileInputRef = useRef(null);
   if (!mounted) return null;
   async function remove(h) {
     setDeleting(h.id);
@@ -1268,6 +1269,21 @@ export function HistoryDrawer({ open, history, onClose, onClear, onDelete, onSto
     } finally {
       setDeleting(null);
     }
+  }
+  function handleImportFile(e) {
+    const file = e.target?.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const data = JSON.parse(reader.result);
+        if (onImport) onImport(data);
+      } catch {
+        alert('Invalid report file');
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
   }
   return (
     <div id="history-drawer" className="fixed inset-0 z-50" role="dialog" aria-modal="true" aria-labelledby="history-title">
@@ -1292,6 +1308,16 @@ export function HistoryDrawer({ open, history, onClose, onClear, onDelete, onSto
             </h2>
             <p className="text-[11px] text-[var(--color-ink-faint)]">stored locally · deleting a run also removes its sandboxes</p>
           </div>
+          <input ref={fileInputRef} type="file" accept=".json" className="hidden" onChange={handleImportFile} />
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            aria-label="Import a battle report"
+            className="flex items-center gap-1.5 rounded-md border border-[var(--color-line)] px-2 py-1.5 text-[11px] text-[var(--color-ink-faint)] transition-colors hover:border-[var(--color-accent)]/40 hover:text-[var(--color-accent)]"
+            title="Import a saved battle report"
+          >
+            <Icon name="restore" className="size-3.5" />
+            <span>load</span>
+          </button>
           <button
             onClick={onClear}
             aria-label="Clear battle history"
@@ -1316,6 +1342,7 @@ export function HistoryDrawer({ open, history, onClose, onClear, onDelete, onSto
               {history.map((h) => {
                 const running = h.status === 'running';
                 const stopped = h.status === 'stopped';
+                const errored = h.status === 'error';
                 return (
                   <div key={h.id} className="rounded-xl border border-[var(--color-line)] bg-[var(--color-surface)] px-3.5 py-3">
                     <div className="flex items-center justify-between gap-2">
@@ -1344,10 +1371,14 @@ export function HistoryDrawer({ open, history, onClose, onClear, onDelete, onSto
                           running
                         </span>
                       ) : stopped ? (
-                        <span className="shrink-0 rounded-md border border-[var(--color-line-hi)] bg-[var(--color-panel-hi)] px-1.5 py-0.5 text-[10px] text-[var(--color-ink-dim)]">
+                        <span className="shrink-0 rounded-md border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-400">
                           stopped
                         </span>
-                      ) : (
+                      ) : errored ? (
+                        <span className="shrink-0 rounded-md border border-red-500/30 bg-red-500/10 px-1.5 py-0.5 text-[10px] text-red-400">
+                          failed
+                        </span>
+                      ) : h.verdict ? (
                         <span
                           className={`shrink-0 rounded-md border px-1.5 py-0.5 text-[10px] ${
                             h.verdict === 'ACC ahead'
@@ -1358,6 +1389,10 @@ export function HistoryDrawer({ open, history, onClose, onClear, onDelete, onSto
                           }`}
                         >
                           {h.verdict}
+                        </span>
+                      ) : (
+                        <span className="shrink-0 rounded-md border border-[var(--color-line)] px-1.5 py-0.5 text-[10px] text-[var(--color-ink-faint)]">
+                          completed
                         </span>
                       )}
                       {running && (

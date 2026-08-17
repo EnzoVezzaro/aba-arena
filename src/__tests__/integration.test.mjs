@@ -131,12 +131,22 @@ describe('Step 1 — Load repo + ACC pipeline', () => {
     // Step 2 — sandboxes created
     expect(steps.find((s) => s.step === 2 && s.ok)).toBeTruthy();
 
-    // ACC pipeline: all five steps succeeded
+    // ACC pipeline: all steps succeeded — including the fill-apply (the
+    // deterministic completion of every contract) and the acc check gate
+    // (the framework's own compliance validation).
     expect(steps.find((s) => s.label === 'acc init'                && s.ok)).toBeTruthy();
+    expect(steps.find((s) => s.label === 'acc config (workflows)'  && s.ok)).toBeTruthy();
+    expect(steps.find((s) => s.label === 'acc config (settings)'   && s.ok)).toBeTruthy();
+    expect(steps.find((s) => s.label === 'acc config (agents + standards)' && s.ok)).toBeTruthy();
     expect(steps.find((s) => s.label === 'acc build (contracts)'   && s.ok)).toBeTruthy();
+    expect(steps.find((s) => s.label === 'acc build (folder coverage)' && s.ok)).toBeTruthy();
     expect(steps.find((s) => s.label === 'acc fill (fill directive)' && s.ok)).toBeTruthy();
+    expect(steps.find((s) => s.label === 'acc fill (apply content)' && s.ok)).toBeTruthy();
+    expect(steps.find((s) => s.label === 'acc memory (records)'     && s.ok)).toBeTruthy();
     expect(steps.find((s) => s.label === 'acc graph (scan)'        && s.ok)).toBeTruthy();
     expect(steps.find((s) => s.label === 'acc context (prepare)'   && s.ok)).toBeTruthy();
+    expect(steps.find((s) => s.label === 'acc check (validate)'    && s.ok)).toBeTruthy();
+    expect(steps.find((s) => s.label === 'acc verify (documentation)' && s.ok)).toBeTruthy();
 
     // Step 7 — harness installed + self-check
     const harness = steps.find((s) => s.step === 7 && s.ok);
@@ -177,6 +187,102 @@ describe('Step 2 — Battle page (sandboxes ready)', () => {
       expect(acc.body.tree.map((e) => e.path)).toContain(f);
       expect(plain.body.tree.map((e) => e.path)).toContain(f);
     }
+  });
+
+  it('ACC sandbox is fully ACC-compliant before battle (all framework files + filled contracts)', async () => {
+    expect(result).not.toBeNull();
+    const battleDir = path.join(SANDBOX, 'battles', result.repo.battleId, 'acc');
+
+    // Every ACC framework artifact the pipeline must produce on disk.
+    const top = (await get('/api/sandbox/acc/tree?path=/')).body.tree.map((e) => e.path);
+    expect(top).toContain('.acc');
+    expect(top).toContain('.acc-memory.md');
+    expect(top).toContain('AGENTS.md'); // root contract scaffolded by acc document
+    expect(fs.existsSync(path.join(battleDir, '.acc', 'config', 'config.yaml'))).toBe(true);
+    expect(fs.existsSync(path.join(battleDir, '.acc', 'config', 'workflows'))).toBe(true);
+    expect(fs.existsSync(path.join(battleDir, '.acc-memory.md'))).toBe(true);
+
+    // The root AGENTS.md contract is COMPLETE: all required sections present,
+    // no template placeholders left behind.
+    const agents = await get('/api/sandbox/acc/file?path=AGENTS.md');
+    expect(agents.status).toBe(200);
+    for (const section of ['Purpose', 'Responsibilities', 'Ownership', 'Inputs', 'Outputs', 'Dependencies', 'Constraints', 'Architecture']) {
+      expect(agents.body.content).toMatch(new RegExp(`^## ${section}$`, 'm'));
+    }
+    expect(agents.body.content).not.toMatch(/<[^>]+>/);
+    expect(agents.body.content).not.toMatch(/Describe what .+ does in one sentence/);
+
+    // Control plane config is the real scaffolded file with EVERY setting,
+    // project-aware (javascript analyzer for this .js repo, ignore list).
+    const cfg = await get('/api/sandbox/acc/file?path=.acc/config/config.yaml');
+    expect(cfg.status).toBe(200);
+    for (const key of ['schema_version', 'language_analyzers', 'ignore', 'diagnostics', 'ownership', 'multi_agent', 'tools', 'context', 'graph', 'memory']) {
+      expect(cfg.body.content).toContain(`${key}:`);
+    }
+    expect(cfg.body.content).toContain('javascript: true');
+    expect(cfg.body.content).toContain('- node_modules');
+    // The docs' full settings surface.
+    expect(cfg.body.content).toContain('resource_limits:');
+    expect(cfg.body.content).toContain('cpu_percent: 80');
+    expect(cfg.body.content).toContain('allowed_commands: []');
+    expect(cfg.body.content).toContain('approval: auto');
+    expect(cfg.body.content).toContain('permissions:');
+
+    // Agent profile + standards + standard workflows are all scaffolded.
+    const profile = await get('/api/sandbox/acc/file?path=.acc/config/agents/default.md');
+    expect(profile.status).toBe(200);
+    expect(profile.body.content).toContain('Operating rules');
+    for (const std of ['architecture.md', 'coding.md', 'review.md']) {
+      const f = await get(`/api/sandbox/acc/file?path=.acc/config/standards/${std}`);
+      expect(f.status).toBe(200);
+      expect(f.body.content).toMatch(/^# .+$/m);
+    }
+    for (const wf of ['feature.md', 'bugfix.md', 'refactor.md', 'release.md', 'security.md', 'diagnostic.md', 'tooling.md']) {
+      const f = await get(`/api/sandbox/acc/file?path=.acc/config/workflows/${wf}`);
+      expect(f.status).toBe(200);
+      expect(f.body.content).toMatch(/^# .+$/m);
+    }
+    // The docs' full control plane: skills, mcp, tools, multi-agent.
+    for (const sub of ['skills', 'mcp', 'tools', 'multi-agent']) {
+      const f = await get(`/api/sandbox/acc/file?path=.acc/config/${sub}/README.md`);
+      expect(f.status).toBe(200);
+    }
+  });
+
+  it('every AGENTS.md contract has a filled .acc-memory.md alongside it', async () => {
+    expect(result).not.toBeNull();
+    // Collect every AGENTS.md path from the recursive tree.
+    const { body } = await get('/api/sandbox/acc/tree?path=/');
+    const agents = [];
+    const walk = (entries, prefix) => {
+      for (const e of entries) {
+        const rel = prefix + e.path;
+        if (e.type === 'dir') walk(e.children || [], `${rel}/`);
+        else if (e.path.toLowerCase() === 'agents.md') agents.push(rel);
+      }
+    };
+    walk(body.tree, '');
+    expect(agents.length).toBeGreaterThanOrEqual(1);
+
+    // Each contract's directory carries a non-empty, timestamped memory file.
+    for (const rel of agents) {
+      const dir = rel.endsWith('AGENTS.md') ? rel.slice(0, -'AGENTS.md'.length) : '';
+      const memPath = `${dir}.acc-memory.md`;
+      const mem = await get(`/api/sandbox/acc/file?path=${encodeURIComponent(memPath)}`);
+      expect(mem.status).toBe(200);
+      expect(mem.body.content.trim()).not.toBe('');
+      expect(mem.body.content).toMatch(/^## \d{4}-\d{2}-\d{2}/m);
+    }
+  });
+
+  it('plain sandbox is the untouched no-ACC panel (no framework files)', async () => {
+    expect(result).not.toBeNull();
+    const top = (await get('/api/sandbox/plain/tree?path=/')).body.tree.map((e) => e.path);
+    expect(top).not.toContain('.acc');
+    expect(top).not.toContain('.acc-memory.md');
+    expect(top).not.toContain('AGENTS.md');
+    const agents = await get('/api/sandbox/plain/file?path=AGENTS.md');
+    expect(agents.status).toBe(404);
   });
 
   it('both sandboxes have .aba-agent.cjs installed', async () => {

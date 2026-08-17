@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { PROVIDERS, getProvider, loadKeys, fetchProviderModels, PUBLIC_MODELS_PROVIDERS, modelIdList, modelTools } from './providers.js';
 import { DEFAULT_TASKS } from './tasks.js';
-import { health, loadRepo, deleteBattle, deleteAllBattles, fsList } from './api.js';
+import { health, loadRepo, deleteBattle, deleteAllBattles, fsList, saveReport } from './api.js';
 import IconSprite from './icons.jsx';
 import {
   Icon,
@@ -155,6 +155,7 @@ export default function App() {
   // (import → sandboxes → acc init/build/fill → harness) while loading.
   const [setupSteps, setSetupSteps] = useState([]);
   const [setupError, setSetupError] = useState('');
+  const [loadComplete, setLoadComplete] = useState(false); // true when pipeline finished successfully
   const [backend, setBackend] = useState(null);
 
   const [panels, setPanels] = useState(INITIAL_PANELS);
@@ -273,6 +274,7 @@ export default function App() {
     const src = (typeof source === 'string' ? source : repoInput).trim();
     if (!src) return;
     setLoadingRepo(true);
+    setLoadComplete(false);
     setLoadElapsed(0);
     setSetupSteps([]);
     setSetupError('');
@@ -280,14 +282,9 @@ export default function App() {
     const t0 = Date.now();
     const timer = setInterval(() => setLoadElapsed(Math.round((Date.now() - t0) / 1000)), 1000);
     try {
-      // When the text matches one of the connected account's repos (typed or
-      // picked), clone it as GitHub with the account token so private repos
-      // work. Anything else (URL or local path) loads normally.
       const matched = github.repos.find((r) => r.full === src);
       const opts = matched || githubRepo ? { type: 'github', token: github.token } : {};
       const data = await loadRepo(src, opts, (evt) => {
-        // The ACC sandbox is set up once, at load — stream its phases live.
-        // Steps are keyed by label (graph + context share step number 6).
         if (evt.type === 'step') {
           setSetupSteps((prev) => [...prev.filter((s) => s.label !== evt.label), evt]);
         }
@@ -298,6 +295,7 @@ export default function App() {
         accContext: data.accContext,
         accPipeline: data.accPipeline || [],
       });
+      setLoadComplete(true);
     } catch (err) {
       setRepoError(err.message);
       setSetupError(err.message);
@@ -469,6 +467,29 @@ export default function App() {
     localStorage.removeItem(PENDING_BATTLE_KEY);
     setHistory([]);
     saveHistory([]);
+  }
+
+  // Import a saved battle report: save it server-side and add to local history.
+  async function importHistoryReport(data) {
+    const id = data.battleId || data.repo?.battleId || `b${Date.now().toString(36)}`;
+    try {
+      await saveReport({ ...data, battleId: id });
+    } catch {
+      alert('Failed to save report to server');
+      return;
+    }
+    const entry = {
+      id,
+      battleId: id,
+      ts: data.savedAt ? new Date(data.savedAt).getTime() : Date.now(),
+      repoName: data.repo?.name || 'imported',
+      repoSource: data.repo?.source || '',
+      taskCount: (data.tasks || []).length,
+      status: 'done',
+    };
+    const next = [entry, ...history.filter((x) => x.id !== id)].slice(0, 20);
+    setHistory(next);
+    saveHistory(next);
   }
 
   const accPipeline = repo?.accPipeline || [];
@@ -895,7 +916,7 @@ export default function App() {
       {/* While a repo loads, only the ACC sandbox setup is shown: the server
           runs acc init/build/fill once at load and streams each phase here.
           When the environment is ready, the arena (both panels) appears. */}
-      {loadingRepo && (
+      {(loadingRepo || loadComplete) && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center p-6" role="status" aria-live="polite">
           <div className="absolute inset-0 bg-black/80 backdrop-blur-md" />
           <div className="panel-premium relative w-[min(92vw,560px)] overflow-hidden p-5 sm:p-6">
@@ -904,7 +925,9 @@ export default function App() {
                 <Icon name="bolt" className="size-5" />
               </span>
               <div className="min-w-0 flex-1">
-                <h2 className="truncate text-[14px] font-medium text-[var(--color-ink)]">Setting up the ACC sandbox</h2>
+                <h2 className="truncate text-[14px] font-medium text-[var(--color-ink)]">
+                  {loadComplete ? 'ACC sandbox ready' : 'Setting up the ACC sandbox'}
+                </h2>
                 <p className="mt-0.5 truncate font-mono text-[10px] text-[var(--color-ink-faint)]">{repoInput || '…'}</p>
               </div>
               <span className="shrink-0 font-mono text-[10px] tabular-nums text-[var(--color-ink-faint)]">{loadElapsed}s</span>
@@ -915,7 +938,7 @@ export default function App() {
               starts. The plain sandbox is copied in parallel; both panels appear as soon as this finishes.
             </p>
             <ul className="mt-4 space-y-2">
-              {setupSteps.length === 0 && (
+              {setupSteps.length === 0 && !loadComplete && (
                 <li className="flex items-center gap-2.5 text-[12px] text-[var(--color-ink-faint)]">
                   <span className="size-3 shrink-0 animate-spin rounded-full border-2 border-[var(--color-line-hi)] border-t-[var(--color-accent)]" />
                   connecting to the server…
@@ -945,9 +968,18 @@ export default function App() {
             <div className="mt-4 h-1 overflow-hidden rounded-full bg-[var(--color-line)]">
               <div
                 className="h-full rounded-full bg-[var(--color-accent)] transition-all duration-300"
-                style={{ width: `${Math.min(100, Math.round((Math.max(0, ...setupSteps.filter((s) => s.ok === true).map((s) => s.step)) / 7) * 100))}%` }}
+                style={{ width: `${Math.min(100, Math.round((Math.max(0, ...setupSteps.filter((s) => s.ok === true).map((s) => s.step)) / 8) * 100))}%` }}
               />
             </div>
+            {/* Close button — visible when loading is complete */}
+            {loadComplete && (
+              <button
+                onClick={() => setLoadComplete(false)}
+                className="mt-4 w-full rounded-lg border border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 px-4 py-2.5 text-[13px] font-medium text-[var(--color-accent)] transition hover:bg-[var(--color-accent)]/20"
+              >
+                Ready — continue to arena
+              </button>
+            )}
           </div>
         </div>
       )}
@@ -975,6 +1007,7 @@ export default function App() {
         onStop={stopHistoryItem}
         onResume={navigateToBattle}
         onOpen={openHistoryBattle}
+        onImport={importHistoryReport}
       />
     </div>
   );

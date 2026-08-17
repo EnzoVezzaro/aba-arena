@@ -1,5 +1,4 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { getProvider, loadKeys } from './providers.js';
 import { checkSuccess } from './tasks.js';
 import {
   fmtDur,
@@ -8,8 +7,9 @@ import {
   estTokens,
   computeWinners,
 } from './arena.js';
+import { getProvider, loadKeys, estimateCost } from './providers.js';
 import { Icon, ResultCard, PENDING_BATTLE_KEY, loadHistory, saveHistory } from './components.jsx';
-import { loadRepo, saveReport, loadReport, sandboxTree, runAgent } from './api.js';
+import { loadRepo, saveReport, loadReport, sandboxTree, runAgent, deleteBattle } from './api.js';
 import Timeline from './Timeline.jsx';
 import IconSprite from './icons.jsx';
 import CodeExplorer from './CodeExplorer.jsx';
@@ -84,7 +84,6 @@ export default function BattlePage({ onBack }) {
     // the toolbar — it hides identity for judging, and with it the Code view.
     return { enabled: false, order: shuffle(ids.length ? ids : ['acc', 'plain']), revealed: false };
   });
-  const [savedReport, setSavedReport] = useState('');
   const [explorerPanel, setExplorerPanel] = useState(null); // null | panel object
 
   const abortRef = useRef(new Set());
@@ -192,17 +191,20 @@ export default function BattlePage({ onBack }) {
       // Act tasks fail the benchmark when the project no longer runs; plan
       // tasks are judged on the answer alone.
       const success = mode === 'act' ? answerOk && verified === true : answerOk;
+      const inputTokens = done.inputTokens ?? null;
+      const outputTokens = done.outputTokens ?? null;
+      const cost = inputTokens != null || outputTokens != null
+        ? estimateCost(panel.model, inputTokens ?? 0, outputTokens ?? 0)
+        : null;
       return {
         status: 'done',
         output,
         timeMs: elapsed,
         ttftMs: firstTokenAt ? firstTokenAt - startedAt : elapsed,
         genMs: firstTokenAt ? doneAt - firstTokenAt : 0,
-        // Token usage/cost are reported by the provider inside the sandbox
-        // harness, not streamed back — leave them null so the UI shows '—'.
-        inputTokens: null,
-        outputTokens: null,
-        cost: null,
+        inputTokens,
+        outputTokens,
+        cost,
         success,
         verified,
         verifyCommand: verifyInfo?.command || '',
@@ -386,19 +388,41 @@ export default function BattlePage({ onBack }) {
     abortRef.current.clear();
     for (const release of stopHandlersRef.current) release();
     stopHandlersRef.current.clear();
+    // Persist whatever results we have so far (report + history).
+    persistBattle(results, 'stopped');
     const id = battle?.id || battle?.repo?.battleId;
     if (id) upsertHistory({ id, status: 'stopped' });
-    // A stopped battle must not auto-restart on the next visit to /battle.
     localStorage.removeItem(PENDING_BATTLE_KEY);
     setBattleStatus('stopped');
   }
 
-  function persistBattle(final) {
+  async function deleteBattleAndGoBack() {
+    if (!window.confirm('Delete this battle and its sandboxes?')) return;
+    const id = battle?.repo?.battleId || battle?.id;
+    stoppedRef.current = true;
+    for (const c of abortRef.current) c.abort();
+    abortRef.current.clear();
+    for (const release of stopHandlersRef.current) release();
+    stopHandlersRef.current.clear();
+    try {
+      if (id) await deleteBattle(id);
+    } catch {
+      // server gone — still navigate back
+    }
+    localStorage.removeItem(PENDING_BATTLE_KEY);
+    onBack();
+  }
+
+  function persistBattle(final, statusOverride) {
     if (!final.length || !repo) return;
     const comparable = final;
     if (!comparable.length) return;
     const done = comparable.filter((r) => r.panels.acc?.status === 'done' || r.panels.plain?.status === 'done');
-    if (!done.length) return;
+    // For stopped or errored battles, still save — just without a verdict.
+    const hasResults = done.length > 0 || comparable.some((r) =>
+      Object.values(r.panels).some((p) => p?.status === 'done' || p?.status === 'error')
+    );
+    if (!hasResults) return;
     const accWins = done.filter((r) => {
       const a = r.panels.acc;
       const p = r.panels.plain;
@@ -406,21 +430,21 @@ export default function BattlePage({ onBack }) {
       if (a.success !== p.success) return a.success;
       return a.timeMs < p.timeMs;
     }).length;
+    const battleStatus = statusOverride || (stoppedRef.current ? 'stopped' : 'done');
     const id = battle?.id || battle?.repo?.battleId || String(Date.now());
     upsertHistory({
       id,
-      battleId: repo.battleId || id, // sandbox + report are keyed by this on the server
+      battleId: repo.battleId || id,
       ts: Date.now(),
       repoName: repo.name,
       repoSource: repo.source,
       taskCount: comparable.length,
-      accWins,
-      verdict: accWins > comparable.length / 2 ? 'ACC ahead' : accWins < comparable.length / 2 ? 'no-ACC ahead' : 'tie',
-      status: 'done',
+      accWins: done.length > 0 ? accWins : undefined,
+      verdict: done.length > 0
+        ? (accWins > comparable.length / 2 ? 'ACC ahead' : accWins < comparable.length / 2 ? 'no-ACC ahead' : 'tie')
+        : undefined,
+      status: battleStatus,
     });
-    // Save the full report server-side (keyed by battleId) so this run can be
-    // reopened from the history panel — click a run, see the battle. Best
-    // effort: the run already lives in local history if this fails.
     saveReport({
       battleId: repo.battleId || id,
       repo,
@@ -471,14 +495,22 @@ export default function BattlePage({ onBack }) {
     };
   }, [results]);
 
-  async function handleSaveReport() {
-    try {
-      // Name the report by battleId so the history panel can reopen it.
-      const r = await saveReport({ battleId: repo.battleId || battle?.id, repo, panels, tasks, results, savedAt: new Date().toISOString() });
-      setSavedReport(r.file);
-    } catch (e) {
-      setSavedReport(`failed: ${e.message}`);
-    }
+  function handleExportReport() {
+    const report = {
+      battleId: repo.battleId || battle?.id,
+      repo,
+      panels,
+      tasks,
+      results,
+      savedAt: new Date().toISOString(),
+    };
+    const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `battle-${repo.battleId || battle?.id || 'export'}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
   }
 
   /* --------------------------- lifecycle -------------------------------- */
@@ -529,6 +561,16 @@ export default function BattlePage({ onBack }) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Toggle the glowing top-border animation while the battle is running.
+  useEffect(() => {
+    if (battleStatus === 'running') {
+      document.body.classList.add('battle-running');
+    } else {
+      document.body.classList.remove('battle-running');
+    }
+    return () => document.body.classList.remove('battle-running');
+  }, [battleStatus]);
 
   /* --------------------------- render ----------------------------------- */
 
@@ -609,6 +651,26 @@ export default function BattlePage({ onBack }) {
                   <span className="hidden sm:inline">plain files</span>
                 </button>
               </>
+            )}
+            {battleStatus === 'running' && (
+              <button
+                onClick={stopBattle}
+                className="control-surface flex min-h-9 items-center gap-1.5 px-3 text-[11px] text-red-400 transition-colors hover:border-red-500/40 hover:bg-red-500/10"
+                title="Stop this battle"
+              >
+                <Icon name="stop" className="size-3.5" />
+                <span className="hidden sm:inline">Stop</span>
+              </button>
+            )}
+            {battleStatus !== 'idle' && (
+              <button
+                onClick={deleteBattleAndGoBack}
+                className="control-surface flex min-h-9 items-center gap-1.5 px-3 text-[11px] text-[var(--color-ink-faint)] transition-colors hover:border-red-500/40 hover:bg-red-500/10 hover:text-red-400"
+                title="Delete this battle and its sandboxes"
+              >
+                <Icon name="trash" className="size-3.5" />
+                <span className="hidden sm:inline">Delete</span>
+              </button>
             )}
             <span
               className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[10px] uppercase tracking-[0.14em] ${
@@ -872,12 +934,10 @@ export default function BattlePage({ onBack }) {
                                 ? `${panelLabel('plain')} ahead — ${summary.total - summary.accWins}/${summary.total} tasks better`
                                 : `tie — ${summary.accWins}/${summary.total}`}
                           </span>
-                          <button onClick={handleSaveReport} className="ml-3 control-surface px-3 py-1.5 text-[11px]">
-                            💾 Save report
+                          <button onClick={handleExportReport} className="ml-3 control-surface flex items-center gap-1.5 px-3 py-1.5 text-[11px]">
+                            <Icon name="copy" className="size-3.5" />
+                            <span>Export</span>
                           </button>
-                          {savedReport && (
-                            <span className="ml-2 font-mono text-[10px] text-emerald-400">{savedReport}</span>
-                          )}
                         </td>
                       </tr>
                     </tbody>

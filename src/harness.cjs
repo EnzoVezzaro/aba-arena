@@ -344,12 +344,20 @@ async function runAgent() {
   const startedAt = Date.now();
   let output = '';
   let steps = 0;
+  let totalInputTokens = 0;
+  let totalOutputTokens = 0;
   // Every onStepFinish fires once per agent loop step — count them here so
   // the done event reports the real step count immediately (the SDK's
   // result.steps promise only resolves after the stream fully closes).
   const onStep = (step) => {
     steps++;
     emitStep(step);
+    // Accumulate token usage from the AI SDK step result.
+    const u = step?.usage;
+    if (u) {
+      totalInputTokens += u.promptTokens ?? 0;
+      totalOutputTokens += u.completionTokens ?? 0;
+    }
   };
 
   try {
@@ -443,6 +451,8 @@ async function runAgent() {
     mode,
     timeMs: Date.now() - startedAt,
     steps,
+    inputTokens: totalInputTokens || null,
+    outputTokens: totalOutputTokens || null,
   });
 }
 
