@@ -217,8 +217,3 @@ context, consider sponsoring:
 ## License
 
 [MIT](LICENSE)
-
-
-🚧 **Work in Progress**
-
-> [ ] ⚠️ **Current issue:** Render is showing a white screen — needs a fix.
