@@ -135,6 +135,34 @@ describe('estimateCost', () => {
     expect(cost).toBeGreaterThan(0);
     expect(cost).toBeLessThan(0.01);
   });
+
+  it('returns 0 for free providers', () => {
+    expect(estimateCost('z-ai/glm-5.1', 1000000, 1000000, 'freebuff')).toBe(0);
+  });
+
+  it('returns 0 for local providers', () => {
+    expect(estimateCost('llama3.1', 1000000, 1000000, 'ollama')).toBe(0);
+  });
+
+  it('returns 0 for OpenRouter :free models', () => {
+    expect(estimateCost('openai/gpt-4o:free', 1000000, 1000000, 'openrouter')).toBe(0);
+  });
+
+  it('falls back to the genai-prices catalog for unknown models', () => {
+    // nvidia/nemotron-3-nano-30b-a3b isn't curated — the catalog prices it
+    // at $0.05 input / $0.20 output per 1M (via OpenRouter's data).
+    const cost = estimateCost('nvidia/nemotron-3-nano-30b-a3b', 1000000, 1000000, 'nvidia');
+    expect(cost).toBeCloseTo(0.25, 5);
+  });
+
+  it('uses the curated rate over the catalog', () => {
+    // gpt-4o is curated ($2.5/$10) and also in the catalog — curated wins.
+    expect(estimateCost('gpt-4o', 1000000, 1000000, 'openai')).toBe(12.5);
+  });
+
+  it('falls back to default pricing when the catalog has no entry', () => {
+    expect(estimateCost('some/unknown-model', 1000000, 1000000, 'nvidia')).toBe(4);
+  });
 });
 
 describe('loadKeys', () => {

@@ -8,6 +8,7 @@ import {
   computeWinners,
 } from './arena.js';
 import { getProvider, loadKeys, estimateCost } from './providers.js';
+import { estimateUsage } from './estimate.js';
 import { Icon, ResultCard, PENDING_BATTLE_KEY, loadHistory, saveHistory } from './components.jsx';
 import { loadRepo, saveReport, loadReport, sandboxTree, runAgent, deleteBattle } from './api.js';
 import Timeline from './Timeline.jsx';
@@ -60,6 +61,21 @@ function shuffle(items) {
   return result;
 }
 
+// The panel that wins one round (task): success first, then time. Neither
+// panel wins when both failed or the times tie.
+function roundWinner(r) {
+  const a = r.panels.acc;
+  const p = r.panels.plain;
+  if (!a || !p) return null;
+  if (a.status !== 'done' && p.status !== 'done') return null;
+  if (a.status !== 'done') return 'plain';
+  if (p.status !== 'done') return 'acc';
+  if (a.success !== p.success) return a.success ? 'acc' : 'plain';
+  if (a.timeMs == null || p.timeMs == null) return null;
+  if (a.timeMs === p.timeMs) return null;
+  return a.timeMs < p.timeMs ? 'acc' : 'plain';
+}
+
 export default function BattlePage({ onBack }) {
   // ?battle=<id> replays a FINISHED run from history: results come from the
   // saved report instead of a live run, so the pending battle is ignored.
@@ -67,7 +83,15 @@ export default function BattlePage({ onBack }) {
   const [viewError, setViewError] = useState('');
   const [battle, setBattle] = useState(() => (viewReportId ? null : loadPendingBattle()));
   const [results, setResults] = useState([]);
-  const [battleStatus, setBattleStatus] = useState(viewReportId ? 'loading' : 'idle'); // idle | running | done | stopped | loading
+  // idle | running | done | stopped | loading. A finished battle (marked
+  // 'done' in the pending snapshot) starts as 'done' so a reload replays the
+  // saved report instead of re-running the battle.
+  const [battleStatus, setBattleStatus] = useState(() => {
+    if (viewReportId) return 'loading';
+    const pending = loadPendingBattle();
+    if (pending?.status === 'done' || pending?.status === 'stopped') return pending.status;
+    return 'idle';
+  });
   const [viewMode, setViewMode] = useState('answer');
   // Per-card view overrides — each sandbox's Code/Answer buttons only affect
   // that card. Key: `${taskIndex}:${panelId}` → 'answer' | 'code'.
@@ -79,12 +103,16 @@ export default function BattlePage({ onBack }) {
   const [blind, setBlind] = useState(() => {
     const pending = loadPendingBattle();
     const ids = (pending?.panels || []).map((p) => p.id);
-    // Off by default: the battle shows real panel names and full features
-    // (per-card Code view, sandbox file browsers). Blind mode is opt-in via
-    // the toolbar — it hides identity for judging, and with it the Code view.
-    return { enabled: false, order: shuffle(ids.length ? ids : ['acc', 'plain']), revealed: false };
+    // Blind mode ON by default: the battle hides which panel runs ACC under
+    // aliases (Panel A / Panel B) for judging. The toolbar's Reveal button
+    // discloses identity — and Shuffle re-assigns aliases without revealing.
+    return { enabled: true, order: shuffle(ids.length ? ids : ['acc', 'plain']), revealed: false };
   });
   const [explorerPanel, setExplorerPanel] = useState(null); // null | panel object
+  // Shuffle animation state — true briefly while the aliases swap so the
+  // panel cards play the shuffle flip animation.
+  const [shuffling, setShuffling] = useState(false);
+  const shuffleTimerRef = useRef(null);
 
   const abortRef = useRef(new Set());
   const battleRef = useRef(battle);
@@ -191,10 +219,19 @@ export default function BattlePage({ onBack }) {
       // Act tasks fail the benchmark when the project no longer runs; plan
       // tasks are judged on the answer alone.
       const success = mode === 'act' ? answerOk && verified === true : answerOk;
-      const inputTokens = done.inputTokens ?? null;
-      const outputTokens = done.outputTokens ?? null;
+      // Provider-reported usage is the default; some providers (free models)
+      // never report it, so fall back to estimates from the exact text sent
+      // and received (ui/src/estimate.js). Estimated values are flagged so
+      // the UI can mark them "(est.)".
+      const reportedInput = done.inputTokens ?? null;
+      const reportedOutput = done.outputTokens ?? null;
+      let inputTokens = reportedInput;
+      let outputTokens = reportedOutput;
+      if (inputTokens == null) inputTokens = estimateUsage({ system: systemPrompt(battleRef.current), prompt: task.prompt, context }).inputTokens;
+      if (outputTokens == null) outputTokens = estimateUsage({ output }).outputTokens;
+      const tokensEstimated = inputTokens !== reportedInput || outputTokens !== reportedOutput;
       const cost = inputTokens != null || outputTokens != null
-        ? estimateCost(panel.model, inputTokens ?? 0, outputTokens ?? 0)
+        ? estimateCost(panel.model, inputTokens ?? 0, outputTokens ?? 0, panel.provider)
         : null;
       return {
         status: 'done',
@@ -204,6 +241,7 @@ export default function BattlePage({ onBack }) {
         genMs: firstTokenAt ? doneAt - firstTokenAt : 0,
         inputTokens,
         outputTokens,
+        tokensEstimated,
         cost,
         success,
         verified,
@@ -284,8 +322,25 @@ export default function BattlePage({ onBack }) {
     });
   }
 
-  function reveal() {
-    setBlind((prev) => ({ ...prev, revealed: true }));
+  // Re-shuffle the aliases while blind mode is active: each panel gets a new
+  // alias, so a judge can re-run the assignment without revealing identity.
+  function shufflePanels() {
+    setShuffling(true);
+    setBlind((prev) => {
+      const ids = panels.map((p) => p.id);
+      // With two panels a plain Fisher-Yates is a coin flip — half the clicks
+      // would keep the same order and look like the button is broken. Keep
+      // drawing until the order actually changes (with 2 panels the only
+      // meaningful shuffle is a swap), so every click visibly re-shuffles.
+      let order = shuffle(ids);
+      let guard = 0;
+      while (guard++ < 10 && String(order) === String(prev.order || ids)) {
+        order = shuffle(ids);
+      }
+      return { ...prev, order };
+    });
+    if (shuffleTimerRef.current) clearTimeout(shuffleTimerRef.current);
+    shuffleTimerRef.current = setTimeout(() => setShuffling(false), 650);
   }
 
   const displayOrder = useMemo(() => {
@@ -378,8 +433,27 @@ export default function BattlePage({ onBack }) {
       }
       if (stoppedRef.current) break;
     }
-    if (!stoppedRef.current) persistBattle(next);
+    if (!stoppedRef.current) {
+      // Save the report first so a reload (which replays it) never finds an
+      // empty one — then mark the pending snapshot done.
+      await persistBattle(next);
+      markPendingDone();
+    }
     setBattleStatus((prev) => (prev === 'stopped' ? 'stopped' : 'done'));
+  }
+
+  // The battle finished — tag the pending snapshot so a reload replays the
+  // saved report instead of re-running the whole battle.
+  function markPendingDone() {
+    try {
+      const pending = JSON.parse(localStorage.getItem(PENDING_BATTLE_KEY) || 'null');
+      if (pending) {
+        pending.status = 'done';
+        localStorage.setItem(PENDING_BATTLE_KEY, JSON.stringify(pending));
+      }
+    } catch {
+      // malformed pending battle — ignore
+    }
   }
 
   function stopBattle() {
@@ -445,7 +519,7 @@ export default function BattlePage({ onBack }) {
         : undefined,
       status: battleStatus,
     });
-    saveReport({
+    return saveReport({
       battleId: repo.battleId || id,
       repo,
       panels,
@@ -492,6 +566,9 @@ export default function BattlePage({ onBack }) {
       },
       cost: { acc: avg(acc, (r) => r.cost), plain: avg(plain, (r) => r.cost) },
       success: { acc: acc.filter((r) => r.success).length, plain: plain.filter((r) => r.success).length },
+      // True when any finished panel's numbers came from the estimation
+      // fallback (provider reported no usage) — the table marks them '~'.
+      tokensEstimated: acc.some((r) => r.tokensEstimated) || plain.some((r) => r.tokensEstimated),
     };
   }, [results]);
 
@@ -534,6 +611,21 @@ export default function BattlePage({ onBack }) {
         .catch((err) => setViewError(err.message || String(err)));
       return;
     }
+    if (repo && (battleStatus === 'done' || battleStatus === 'stopped')) {
+      // The battle already finished (pending snapshot marked done) — replay
+      // the saved report instead of re-running it. If the report is gone
+      // (server restarted), stay done with whatever results are left; never
+      // restart the battle.
+      startedRef.current = true;
+      const id = battle?.repo?.battleId || battle?.id;
+      loadReport(id)
+        .then((r) => {
+          if (r?.results) setResults(r.results);
+          setBattleStatus('done');
+        })
+        .catch(() => setBattleStatus('done'));
+      return;
+    }
     if (repo && battleStatus === 'idle') {
       startedRef.current = true;
       // The sandbox APIs need the repo loaded server-side (server state is
@@ -572,6 +664,9 @@ export default function BattlePage({ onBack }) {
     return () => document.body.classList.remove('battle-running');
   }, [battleStatus]);
 
+  // Clear the shuffle animation timer on unmount.
+  useEffect(() => () => clearTimeout(shuffleTimerRef.current), []);
+
   /* --------------------------- render ----------------------------------- */
 
   if (!battle || !repo) {
@@ -604,6 +699,22 @@ export default function BattlePage({ onBack }) {
 
   const accPipeline = repo.accPipeline || [];
 
+  // Which panel holds the better value for a metric (null on tie or missing).
+  // Used to accent the winning side in the averages — never when blinded,
+  // since accent is the ACC identity color.
+  const better = (accV, plainV, lowerBetter) => {
+    if (accV == null || plainV == null || !Number.isFinite(accV) || !Number.isFinite(plainV)) return null;
+    if (accV === plainV) return null;
+    return (lowerBetter ? accV < plainV : accV > plainV) ? 'acc' : 'plain';
+  };
+  // Winning value: bold always, accent-colored for ACC unless blinded (the
+  // accent is the ACC identity color, so blind mode keeps winners neutral).
+  const highlight = (side) => {
+    if (!side) return 'text-[var(--color-ink)]';
+    if (!blinded && side === 'acc') return 'font-semibold text-[var(--color-accent)]';
+    return 'font-semibold text-[var(--color-ink)]';
+  };
+
   return (
     <div className="grid-bg min-h-screen">
       <IconSprite />
@@ -618,19 +729,6 @@ export default function BattlePage({ onBack }) {
             <Icon name="arrow-left" className="size-4" />
             <span className="hidden sm:inline">Arena</span>
           </button>
-          <div className="flex min-w-0 items-center gap-2.5">
-            <span className="grid size-9 shrink-0 place-items-center rounded-[0.65rem] border border-[var(--color-accent)]/20 bg-[var(--color-accent)]/[0.06]">
-              <img src="/favicon.svg" alt="" className="size-5" />
-            </span>
-            <div className="min-w-0">
-              <p className="truncate text-[14px] font-bold tracking-[-0.03em] text-[var(--color-ink)]">
-                <span className="ml-2">Battle</span>
-              </p>
-              <p className="truncate font-mono text-[10px] text-[var(--color-ink-faint)]">
-                {repo.name} {repo.sha ? `· ${String(repo.sha).slice(0, 10)}` : ''}
-              </p>
-            </div>
-          </div>
           <div className="flex items-center gap-2">
             {!blinded && (
               <>
@@ -693,7 +791,10 @@ export default function BattlePage({ onBack }) {
           {/* ========================= BATTLE INTRO ========================= */}
           <section className="arena-intro py-5">
             <h1 className="max-w-3xl text-balance text-[clamp(1.6rem,3.5vw,2.6rem)] font-semibold leading-[1.05] tracking-[-0.05em] text-[var(--color-ink)]">
-              {repo.name} — <em className="not-italic text-[var(--color-accent)]">ACC vs no-ACC</em>
+              {repo.name} —{' '}
+              <em className={`not-italic ${blinded ? 'text-[var(--color-ink-dim)]' : 'text-[var(--color-accent)]'}`}>
+                {blinded ? 'blind battle' : 'ACC vs no-ACC'}
+              </em>
             </h1>
             <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-[var(--color-ink-dim)]">
               <span className="inline-flex items-center gap-1 rounded-md border border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-[var(--color-accent)]">
@@ -760,21 +861,22 @@ export default function BattlePage({ onBack }) {
                     <button
                       onClick={toggleBlind}
                       className={`flex min-h-8 items-center gap-1.5 rounded-lg px-2.5 text-[11px] transition-colors hover:bg-[var(--color-panel-hi)] hover:text-[var(--color-ink)] ${
-                        blind.enabled && !blind.revealed ? 'text-[var(--color-accent)]' : 'text-[var(--color-ink-dim)]'
+                        blinded ? 'text-[var(--color-accent)]' : 'text-[var(--color-ink-dim)]'
                       }`}
-                      title="Hide which panel has ACC until you reveal. Shortcut: B"
-                      aria-pressed={blind.enabled}
+                      title={blinded ? 'Show which panel runs ACC' : 'Hide which panel runs ACC (blind mode)'}
+                      aria-pressed={!blinded}
                     >
-                      <Icon name={blind.enabled && !blind.revealed ? 'eye-off' : 'eye'} className="size-4" />
-                      <span>Blind</span>
+                      <Icon name={blinded ? 'eye' : 'eye-off'} className="size-4" />
+                      <span>{blinded ? 'Reveal' : 'Blind'}</span>
                     </button>
-                    {blind.enabled && !blind.revealed && (
+                    {blinded && (
                       <button
-                        onClick={reveal}
-                        className="flex min-h-9 items-center gap-1.5 rounded-lg border border-[var(--color-accent)]/40 bg-[var(--color-accent)]/10 px-3 text-[12px] text-[var(--color-accent)] transition-colors hover:bg-[var(--color-accent)]/15"
+                        onClick={shufflePanels}
+                        className="flex min-h-9 items-center gap-1.5 rounded-lg border border-[var(--color-line)] px-3 text-[12px] text-[var(--color-ink-dim)] transition-colors hover:border-[var(--color-accent)]/40 hover:text-[var(--color-accent)]"
+                        title="Re-assign which alias is which panel, without revealing identity"
                       >
-                        <Icon name="eye" className="size-4" />
-                        <span>Reveal</span>
+                        <Icon name="shuffle" className={`size-4 ${shuffling ? 'aba-spin' : ''}`} />
+                        <span>Shuffle</span>
                       </button>
                     )}
                     <span className="ml-2 hidden text-[11px] tabular-nums text-[var(--color-ink-dim)]" role="status" aria-live="polite">
@@ -791,7 +893,7 @@ export default function BattlePage({ onBack }) {
               id="results"
               role="tabpanel"
               aria-label="Model results"
-              className="grid flex-1 content-start gap-4 py-4 sm:py-5 grid-cols-[repeat(auto-fill,minmax(min(22rem,100%),1fr))]"
+              className={`grid flex-1 content-start gap-4 py-4 sm:py-5 grid-cols-[repeat(auto-fill,minmax(min(22rem,100%),1fr))] ${shuffling ? 'shuffling' : ''}`}
             >
               {results.length === 0 && (
                 <div id="empty-state" className="col-span-full flex items-center gap-3 rounded-xl border border-dashed border-[var(--color-line)] px-4 py-5 text-[12px] text-[var(--color-ink-faint)]">
@@ -844,7 +946,7 @@ export default function BattlePage({ onBack }) {
                         </span>
                       )}
                     </div>
-                    {displayOrder.map((p) => (
+                    {displayOrder.map((p, idx) => (
                       <ResultCard
                         key={p.id}
                         panel={p}
@@ -856,6 +958,10 @@ export default function BattlePage({ onBack }) {
                         alias={aliasFor(p.id)}
                         best={winners.get(p.id)}
                         repoName={repo?.name}
+                        // Same entrance as the history panel (slide + fade in
+                        // from the side) — mirrored so each card comes in
+                        // from its own edge.
+                        enterFrom={idx === 0 ? 'left' : 'right'}
                       />
                     ))}
                     <div className="col-span-full">
@@ -869,80 +975,194 @@ export default function BattlePage({ onBack }) {
 
           {/* ============================ SUMMARY ============================ */}
           {summary && (
-            <section id="battle-summary" className="aba-fade-in mb-6 overflow-hidden">
+            <section id="battle-summary" className="aba-fade-in mb-6 overflow-hidden rounded-xl border border-[var(--color-line)] bg-[var(--color-panel)]">
               <header className="flex flex-wrap items-center gap-3 border-b border-[var(--color-line)] px-4 py-3.5 sm:px-5">
                 <Icon name="trophy" className="size-4 text-[var(--color-accent)]" />
                 <div>
                   <h2 className="font-pixel text-[11px] uppercase tracking-[0.14em] text-[var(--color-ink)]">Battle analysis</h2>
                   <p className="mt-0.5 text-[10px] text-[var(--color-ink-faint)]">
-                    Heuristic comparison — {blinded ? 'blinded panels' : 'ACC vs no-ACC'}, normalized side by side
+                    Heuristic comparison — {blinded ? 'blinded panels' : 'ACC vs no-ACC'}, per round and averaged
                   </p>
                 </div>
               </header>
-              <div className="scroll-affordance">
-                <div id="battle-summary-list" className="overflow-x-auto">
-                  <table className="w-full min-w-[42rem] text-left text-[11px]">
+
+              {/* Per-round metrics — every task with both panels' numbers */}
+              <div className="scroll-affordance border-b border-[var(--color-line)]">
+                <div id="battle-summary-rounds" className="overflow-x-auto">
+                  <table className="w-full min-w-[58rem] text-left text-[11px]">
                     <thead>
-                      <tr className="border-b border-[var(--color-line)] text-[10px] uppercase tracking-[0.1em] text-[var(--color-ink-faint)]">
-                        <th className="px-4 py-2.5 font-normal">Metric</th>
-                        <th className="px-4 py-2.5 font-normal">{panelLabel('acc')}</th>
-                        <th className="px-4 py-2.5 font-normal">{panelLabel('plain')}</th>
-                        <th className="px-4 py-2.5 text-right font-normal">Tasks</th>
+                      <tr className="border-b border-[var(--color-line)] bg-[var(--color-panel-hi)]/50 text-[10px] uppercase tracking-[0.1em] text-[var(--color-ink-faint)]">
+                        <th className="px-4 py-2.5 font-normal">Round</th>
+                        <th colSpan={4} className="border-l border-[var(--color-line)] px-4 py-2.5 text-center font-normal">
+                          {panelLabel('acc')}
+                        </th>
+                        <th colSpan={4} className="border-l border-[var(--color-line)] px-4 py-2.5 text-center font-normal">
+                          {panelLabel('plain')}
+                        </th>
+                      </tr>
+                      <tr className="text-[10px] uppercase tracking-[0.1em] text-[var(--color-ink-faint)]">
+                        <th className="px-4 py-2 font-normal" />
+                        <th className="border-l border-[var(--color-line)] px-2 py-2 text-right font-normal">time</th>
+                        <th className="px-2 py-2 text-right font-normal" title="input/output tokens">tokens in/out</th>
+                        <th className="px-2 py-2 text-right font-normal" title="estimated cost = input×$1 + output×$3 per 1M tokens (fallback pricing)">cost</th>
+                        <th className="px-2 py-2 text-center font-normal">pass</th>
+                        <th className="border-l border-[var(--color-line)] px-2 py-2 text-right font-normal">time</th>
+                        <th className="px-2 py-2 text-right font-normal" title="input/output tokens">tokens in/out</th>
+                        <th className="px-2 py-2 text-right font-normal" title="estimated cost = input×$1 + output×$3 per 1M tokens (fallback pricing)">cost</th>
+                        <th className="px-2 py-2 text-center font-normal">pass</th>
                       </tr>
                     </thead>
                     <tbody>
-                      <tr className="border-b border-[var(--color-line)]">
-                        <td className="px-4 py-2.5 text-[var(--color-ink-dim)]">Avg time</td>
-                        <td className="px-4 py-2.5 font-mono tabular-nums text-[var(--color-ink)]">{fmtDur(summary.time.acc)}</td>
-                        <td className="px-4 py-2.5 font-mono tabular-nums text-[var(--color-ink)]">{fmtDur(summary.time.plain)}</td>
-                        <td className="px-4 py-2.5 text-right text-[var(--color-ink-faint)]">{summary.total}</td>
-                      </tr>
-                      <tr className="border-b border-[var(--color-line)]">
-                        <td className="px-4 py-2.5 text-[var(--color-ink-dim)]">Avg tokens</td>
-                        <td className="px-4 py-2.5 font-mono tabular-nums text-[var(--color-ink)]">{fmtInt(summary.tokens.acc)}</td>
-                        <td className="px-4 py-2.5 font-mono tabular-nums text-[var(--color-ink)]">{fmtInt(summary.tokens.plain)}</td>
-                        <td className="px-4 py-2.5 text-right text-[var(--color-ink-faint)]">{summary.total}</td>
-                      </tr>
-                      <tr className="border-b border-[var(--color-line)]">
-                        <td className="px-4 py-2.5 text-[var(--color-ink-dim)]">Avg estimated cost</td>
-                        <td className="px-4 py-2.5 font-mono tabular-nums text-[var(--color-ink)]">{fmtCost(summary.cost.acc)}</td>
-                        <td className="px-4 py-2.5 font-mono tabular-nums text-[var(--color-ink)]">{fmtCost(summary.cost.plain)}</td>
-                        <td className="px-4 py-2.5 text-right text-[var(--color-ink-faint)]">{summary.total}</td>
-                      </tr>
-                      <tr className="border-b border-[var(--color-line)]">
-                        <td className="px-4 py-2.5 text-[var(--color-ink-dim)]">Heuristic passes</td>
-                        <td className="px-4 py-2.5 font-mono tabular-nums text-[var(--color-ink)]">{summary.success.acc}/{summary.total}</td>
-                        <td className="px-4 py-2.5 font-mono tabular-nums text-[var(--color-ink)]">{summary.success.plain}/{summary.total}</td>
-                        <td className="px-4 py-2.5 text-right text-[var(--color-ink-faint)]">{summary.total}</td>
-                      </tr>
-                      <tr>
-                        <td className="px-4 py-3 font-medium text-[var(--color-ink)]">Verdict</td>
-                        <td colSpan="3" className="px-4 py-3">
-                          <span
-                            className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[11px] ${
-                              summary.accWins > summary.total / 2
-                                ? 'border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 text-[var(--color-accent)]'
-                                : summary.accWins < summary.total / 2
-                                  ? 'border-red-500/30 bg-red-500/10 text-red-400'
-                                  : 'border-[var(--color-line)] text-[var(--color-ink-dim)]'
-                            }`}
-                          >
-                            <Icon name="trophy" className="size-3.5" />
-                            {summary.accWins > summary.total / 2
-                              ? `${panelLabel('acc')} ahead — ${summary.accWins}/${summary.total} tasks better`
-                              : summary.accWins < summary.total / 2
-                                ? `${panelLabel('plain')} ahead — ${summary.total - summary.accWins}/${summary.total} tasks better`
-                                : `tie — ${summary.accWins}/${summary.total}`}
-                          </span>
-                          <button onClick={handleExportReport} className="ml-3 control-surface flex items-center gap-1.5 px-3 py-1.5 text-[11px]">
-                            <Icon name="copy" className="size-3.5" />
-                            <span>Export</span>
-                          </button>
-                        </td>
-                      </tr>
+                      {results.map((r, i) => {
+                        const winner = roundWinner(r);
+                        // Per-panel cell values for one round.
+                        const cells = (panelId) => {
+                          const x = r.panels[panelId];
+                          if (!x || x.status !== 'done') {
+                            return { time: '—', tokens: '—', cost: '—', pass: x?.status === 'error' ? 'fail' : null };
+                          }
+                          const hasTokens = x.inputTokens != null || x.outputTokens != null;
+                          return {
+                            time: fmtDur(x.timeMs),
+                            // Shown as input/output so the cost math is visible:
+                            // output tokens are priced 3× input, so two runs with
+                            // the same total can cost very differently.
+                            tokens: hasTokens
+                              ? `${x.tokensEstimated ? '~' : ''}${fmtInt(x.inputTokens ?? 0)}/${fmtInt(x.outputTokens ?? 0)}`
+                              : '—',
+                            cost: x.cost != null ? `${x.tokensEstimated ? '~' : ''}${fmtCost(x.cost)}` : '—',
+                            pass: x.success ? 'pass' : 'fail',
+                          };
+                        };
+                        const a = cells('acc');
+                        const p = cells('plain');
+                        const passBadge = (v) =>
+                          v === 'pass' ? (
+                            <span className="inline-flex size-4 items-center justify-center rounded-full bg-emerald-400/15 text-emerald-400">
+                              <Icon name="check" className="size-2.5" />
+                            </span>
+                          ) : v === 'fail' ? (
+                            <span className="inline-flex size-4 items-center justify-center rounded-full bg-red-500/15 text-red-400">
+                              <Icon name="x" className="size-2.5" />
+                            </span>
+                          ) : (
+                            <span className="text-[var(--color-ink-faint)]">—</span>
+                          );
+                        return (
+                          <tr key={i} className="border-b border-[var(--color-line)] last:border-0 transition-colors hover:bg-[var(--color-panel-hi)]/40">
+                            <td className="px-4 py-2.5">
+                              <div className="flex items-center gap-2">
+                                <span className="font-pixel text-[10px] uppercase tracking-[0.14em] text-[var(--color-ink-faint)]">{i + 1}</span>
+                                <span className="max-w-[14rem] truncate text-[var(--color-ink)]" title={r.task.title}>{r.task.title}</span>
+                                {winner && (
+                                  <Icon
+                                    name="trophy"
+                                    className={`size-3.5 shrink-0 ${!blinded && winner === 'acc' ? 'text-[var(--color-accent)]' : 'text-[var(--color-ink-dim)]'}`}
+                                    title={`${panelLabel(winner)} wins this round`}
+                                  />
+                                )}
+                              </div>
+                            </td>
+                            <td className="border-l border-[var(--color-line)] px-2 py-2.5 text-right font-mono tabular-nums text-[var(--color-ink)]">{a.time}</td>
+                            <td className="px-2 py-2.5 text-right font-mono tabular-nums text-[var(--color-ink)]" title={a.tokens !== '—' ? 'input/output tokens' : undefined}>{a.tokens}</td>
+                            <td className="px-2 py-2.5 text-right font-mono tabular-nums text-[var(--color-ink)]">{a.cost}</td>
+                            <td className="px-2 py-2.5 text-center">{passBadge(a.pass)}</td>
+                            <td className="border-l border-[var(--color-line)] px-2 py-2.5 text-right font-mono tabular-nums text-[var(--color-ink)]">{p.time}</td>
+                            <td className="px-2 py-2.5 text-right font-mono tabular-nums text-[var(--color-ink)]" title={p.tokens !== '—' ? 'input/output tokens' : undefined}>{p.tokens}</td>
+                            <td className="px-2 py-2.5 text-right font-mono tabular-nums text-[var(--color-ink)]">{p.cost}</td>
+                            <td className="px-2 py-2.5 text-center">{passBadge(p.pass)}</td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
+                <p className="px-4 py-2 text-[10px] leading-relaxed text-[var(--color-ink-faint)]">
+                  tokens shown as <code className="font-mono">input/output</code> · cost uses the provider's
+                  published rates, falling back to the genai-prices catalog then a generic $1/$3 per 1M (output is
+                  typically 3× input, so a run with fewer total tokens but mostly output can cost nearly as much as a
+                  longer one). Free and local models show $0. Provider-reported usage replaces these estimates when
+                  available.
+                </p>
+              </div>
+
+              {/* Averages — one tile per metric, better side accented */}
+              <div className="grid gap-px bg-[var(--color-line)] sm:grid-cols-2 lg:grid-cols-4">
+                {[
+                  {
+                    label: 'Avg time',
+                    acc: fmtDur(summary.time.acc),
+                    plain: fmtDur(summary.time.plain),
+                    accRaw: summary.time.acc,
+                    plainRaw: summary.time.plain,
+                    lowerBetter: true,
+                  },
+                  {
+                    label: `Avg tokens${summary.tokensEstimated ? ' (est.)' : ''}`,
+                    acc: `${summary.tokensEstimated ? '~' : ''}${fmtInt(summary.tokens.acc)}`,
+                    plain: `${summary.tokensEstimated ? '~' : ''}${fmtInt(summary.tokens.plain)}`,
+                    accRaw: summary.tokens.acc,
+                    plainRaw: summary.tokens.plain,
+                    lowerBetter: true,
+                  },
+                  {
+                    label: `Avg cost${summary.tokensEstimated ? ' (est.)' : ''}`,
+                    acc: `${summary.tokensEstimated ? '~' : ''}${fmtCost(summary.cost.acc)}`,
+                    plain: `${summary.tokensEstimated ? '~' : ''}${fmtCost(summary.cost.plain)}`,
+                    accRaw: summary.cost.acc,
+                    plainRaw: summary.cost.plain,
+                    lowerBetter: true,
+                  },
+                  {
+                    label: 'Heuristic passes',
+                    acc: `${summary.success.acc}/${summary.total}`,
+                    plain: `${summary.success.plain}/${summary.total}`,
+                    accRaw: summary.success.acc,
+                    plainRaw: summary.success.plain,
+                    lowerBetter: false,
+                  },
+                ].map((t) => {
+                  const b = better(t.accRaw, t.plainRaw, t.lowerBetter);
+                  return (
+                    <div key={t.label} className="bg-[var(--color-panel)] px-4 py-3">
+                      <p className="text-[10px] uppercase tracking-[0.1em] text-[var(--color-ink-faint)]">{t.label}</p>
+                      <div className="mt-2 space-y-1.5">
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="text-[10px] text-[var(--color-ink-dim)]">{panelLabel('acc')}</span>
+                          <span className={`font-mono text-[11px] tabular-nums ${highlight(b)}`}>{t.acc}</span>
+                        </div>
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="text-[10px] text-[var(--color-ink-dim)]">{panelLabel('plain')}</span>
+                          <span className={`font-mono text-[11px] tabular-nums ${highlight(b)}`}>{t.plain}</span>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Verdict — the final call, with the export action */}
+              <div className="flex flex-wrap items-center justify-between gap-3 border-t border-[var(--color-line)] bg-[var(--color-panel-hi)]/40 px-4 py-3.5 sm:px-5">
+                <span
+                  className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[11px] ${
+                    summary.accWins > summary.total / 2
+                      ? 'border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 text-[var(--color-accent)]'
+                      : summary.accWins < summary.total / 2
+                        ? 'border-red-500/30 bg-red-500/10 text-red-400'
+                        : 'border-[var(--color-line)] text-[var(--color-ink-dim)]'
+                  }`}
+                >
+                  <Icon name="trophy" className="size-3.5" />
+                  {summary.accWins > summary.total / 2
+                    ? `${panelLabel('acc')} ahead — ${summary.accWins}/${summary.total} tasks better`
+                    : summary.accWins < summary.total / 2
+                      ? `${panelLabel('plain')} ahead — ${summary.total - summary.accWins}/${summary.total} tasks better`
+                      : `tie — ${summary.accWins}/${summary.total}`}
+                </span>
+                <button onClick={handleExportReport} className="control-surface flex items-center gap-1.5 px-3 py-1.5 text-[11px]">
+                  <Icon name="download" className="size-3.5" />
+                  <span>Export report</span>
+                </button>
               </div>
             </section>
           )}

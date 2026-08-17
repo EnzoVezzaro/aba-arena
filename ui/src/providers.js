@@ -2,6 +2,7 @@ import { createOpenAI } from '@ai-sdk/openai';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
+import { calcPrice } from '@pydantic/genai-prices';
 
 /**
  * Every provider the arena supports — the full Vercel AI SDK surface.
@@ -219,6 +220,7 @@ export const PROVIDERS = [
     id: 'ollama',
     label: 'Ollama (local)',
     needsKey: false,
+    local: true, // runs on your machine — local inference costs nothing
     create: () =>
       createOpenAICompatible({ name: 'ollama', baseURL: 'http://localhost:11434/v1', apiKey: 'ollama' }),
     models: ['llama3.2', 'qwen2.5-coder', 'mistral'],
@@ -227,6 +229,7 @@ export const PROVIDERS = [
     id: 'lmstudio',
     label: 'LM Studio (local)',
     needsKey: false,
+    local: true, // runs on your machine — local inference costs nothing
     create: () =>
       createOpenAICompatible({ name: 'lmstudio', baseURL: 'http://localhost:1234/v1', apiKey: 'lm-studio' }),
     models: ['local-model'],
@@ -297,7 +300,9 @@ export function isFreeModel(providerId, modelId) {
   return /:\s*free$|\bfree\b/i.test(String(modelId || ''));
 }
 
-// Approximate $ per 1M tokens (input/output). Estimates — shown as "~".
+// Curated official prices — $ per 1M tokens (input/output), from the
+// provider's own published pricing. These are the "provider's data directly"
+// and win over the catalog below.
 const PRICING = {
   'gpt-4o': { in: 2.5, out: 10 },
   'gpt-4o-mini': { in: 0.15, out: 0.6 },
@@ -318,9 +323,47 @@ const PRICING = {
   'llama-3.1-8b-instant': { in: 0.05, out: 0.08 },
 };
 
-export function estimateCost(model, inputTokens, outputTokens) {
-  const p = PRICING[model] || { in: 1, out: 3 };
-  return (inputTokens / 1e6) * p.in + (outputTokens / 1e6) * p.out;
+// genai-prices catalog lookup — the broad fallback for models without curated
+// rates (OpenRouter's long tail, NVIDIA NIM models, new releases…). Bundles
+// pydantic/genai-prices data (MIT) with intelligent id matching.
+function catalogPrice(model, inputTokens, outputTokens, providerId) {
+  try {
+    const usage = { input_tokens: inputTokens, output_tokens: outputTokens };
+    // Try the explicit provider first (best match). OpenRouter-style ids
+    // ("author/model") only match under the openrouter provider, so retry
+    // that when the id carries a slash, then a bare match as last resort.
+    const attempts = [providerId];
+    if (/\//.test(String(model || ''))) attempts.push('openrouter');
+    for (const pid of attempts) {
+      if (!pid) continue;
+      const r = calcPrice(usage, model, { providerId: pid });
+      if (r && typeof r.total_price === 'number') return r.total_price;
+    }
+    const r = calcPrice(usage, model, {});
+    if (r && typeof r.total_price === 'number') return r.total_price;
+  } catch {
+    // Catalog errors must never break pricing — fall through to the default.
+  }
+  return null;
+}
+
+/**
+ * Estimated cost of one run in USD.
+ *
+ * Priority: free providers/models ($0) → the provider's own published rates
+ * (curated) → the genai-prices catalog → a generic $1/$3 per 1M fallback.
+ */
+export function estimateCost(model, inputTokens, outputTokens, providerId) {
+  const p = providerId ? getProvider(providerId) : null;
+  // Free proxies (freebuff) and local models (ollama/lmstudio) cost nothing;
+  // OpenRouter `:free` models are free too.
+  if (p && (p.free || p.local)) return 0;
+  if (/:\s*free$|\bfree\b/i.test(String(model || ''))) return 0;
+  const curated = PRICING[model];
+  if (curated) return (inputTokens / 1e6) * curated.in + (outputTokens / 1e6) * curated.out;
+  const catalog = catalogPrice(model, inputTokens, outputTokens, providerId);
+  if (catalog != null) return catalog;
+  return (inputTokens / 1e6) * 1 + (outputTokens / 1e6) * 3;
 }
 
 const KEY_STORE = 'aba.providerKeys.v1';

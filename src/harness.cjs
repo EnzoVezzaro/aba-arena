@@ -190,7 +190,24 @@ function listTree(root, prefix = '') {
 
 const SKIP_TOOL = /\.git|node_modules|\/dist\/|\.DS_Store/i;
 
+// Small models (e.g. NVIDIA's 3B nano) frequently emit a tool call with EMPTY
+// arguments (read_file with no path). Two traps: a dead-end error like
+// "no such file: undefined" loops forever, and a fake call syntax like
+// "read_file({...})" derails the model into trying to OUTPUT that string
+// instead of emitting a structured tool call. So: state the fact plainly (no
+// syntax example), and after a few misses tell the model to stop retrying and
+// proceed with what it has — a stuck model burning all its steps fails the
+// task, while a nudge to move on still produces an answer.
 function buildTools(mode) {
+  const misses = {};
+  const missingArg = (toolName, what) => {
+    misses[toolName] = (misses[toolName] || 0) + 1;
+    if (misses[toolName] >= 3) {
+      return `${toolName}: its ${what} argument is still missing after ${misses[toolName]} tries. Stop retrying this tool — proceed with the task using the file listing and the context you already have, or answer directly.`;
+    }
+    return `${toolName}: the tool call arrived without its ${what} argument. Retry the call with the argument filled in.`;
+  };
+
   const tools = {
     list_files: tool({
       description:
@@ -207,9 +224,10 @@ function buildTools(mode) {
     read_file: tool({
       description: 'Read the full contents of a file from the repository. Use this before editing so you see the real code.',
       parameters: z.object({
-        path: z.string().describe('path to the file, relative to repo root (e.g. src/index.js)'),
+        path: z.string().describe('path to the file, relative to repo root'),
       }),
       execute: async ({ path: filePath }) => {
+        if (!filePath) return missingArg('read_file', 'path');
         if (SKIP_TOOL.test(filePath)) return 'that path is not readable in the sandbox';
         const target = safeResolve(filePath);
         if (!fs.existsSync(target) || !fs.statSync(target).isFile()) return `no such file: ${filePath}`;
@@ -224,10 +242,11 @@ function buildTools(mode) {
       description:
         'Write a file in the repository (creates parent directories; overwrites existing files). Use this to make the code changes the task requires.',
       parameters: z.object({
-        path: z.string().describe('path to the file, relative to repo root (e.g. src/index.js)'),
+        path: z.string().describe('path to the file, relative to repo root'),
         content: z.string().describe('the complete new file content'),
       }),
       execute: async ({ path: filePath, content }) => {
+        if (!filePath || content == null) return missingArg('write_file', 'path and content');
         if (SKIP_TOOL.test(filePath)) return 'that path is not writable in the sandbox';
         const target = safeResolve(filePath);
         fs.mkdirSync(path.dirname(target), { recursive: true });
@@ -241,6 +260,7 @@ function buildTools(mode) {
         path: z.string().describe('path to the file, relative to repo root'),
       }),
       execute: async ({ path: filePath }) => {
+        if (!filePath) return missingArg('delete_file', 'path');
         if (SKIP_TOOL.test(filePath)) return 'that path is not deletable in the sandbox';
         const target = safeResolve(filePath);
         if (!fs.existsSync(target)) return `no such file: ${filePath}`;
@@ -250,12 +270,15 @@ function buildTools(mode) {
     });
     tools.bash = tool({
       description:
-        'Run a shell command inside the repository (e.g. npm test, npm run build, git status). Use this to run tests, build, or start the project. Returns exit code + output.',
+        'Run a shell command inside the repository (e.g. this repo\'s test/build commands, git status). Use this to run tests, build, or start the project. Returns exit code + output.',
       parameters: z.object({
         command: z.string().describe('the shell command to run'),
         timeoutMs: z.number().optional().describe('kill the command after this many ms (default 30000)'),
       }),
-      execute: ({ command, timeoutMs = 30000 }) => runBash(command, timeoutMs),
+      execute: ({ command, timeoutMs = 30000 }) => {
+        if (!command) return missingArg('bash', 'command');
+        return runBash(command, timeoutMs);
+      },
     });
   }
 
@@ -387,7 +410,7 @@ async function runAgent() {
   }
 
   // Verify: ask the agent to start the project. The agent decides the command
-  // (reads package.json scripts, runs the right one). A command that exits 0
+  // (reads the project manifest, runs the right command). A command that exits 0
   // OR is still running at the timeout counts as "the project runs".
   let verified = null;
   let verifyInfo = null;
@@ -400,12 +423,13 @@ async function runAgent() {
         read_file: buildTools('act').read_file,
         bash: tool({
           description:
-            'Run a shell command inside the repository (e.g. npm start, npm run dev, npm test, npm run build). Use this to start the project and confirm it runs. Returns exit code + output. A command that keeps running (server) is reported with exitCode null and timedOut true — that still means it started.',
+            'Run a shell command inside the repository (e.g. the start/dev/test/build command from this repo\'s project manifest). Use this to start the project and confirm it runs. Returns exit code + output. A command that keeps running (server) is reported with exitCode null and timedOut true — that still means it started.',
           parameters: z.object({
             command: z.string().describe('the shell command to run'),
             timeoutMs: z.number().optional().describe('kill after this many ms (default 25000)'),
           }),
           execute: async ({ command, timeoutMs = 25000 }) => {
+            if (!command) return missingArg('bash', 'command');
             const r = await runBash(command, timeoutMs);
             record.result = r;
             record.command = command;
@@ -416,8 +440,8 @@ async function runAgent() {
       const vResult = streamText({
         model,
         system:
-          'You are verifying that a repository still runs after code changes. Read package.json (or the project manifest) to find the start/test/build script, then use the bash tool to run it and confirm the project works. A process that stays running (a server) counts as success. Report concisely whether the project runs and what command you used.',
-        prompt: `Start the project and confirm it runs. This is an isolated copy of the repository (your cwd). Use bash to run the appropriate command (check package.json scripts: start, dev, test, build). Report the exact command and whether it succeeded.`,
+          'You are verifying that a repository still runs after code changes. Read the project manifest (package.json, pyproject.toml, Cargo.toml, Makefile, etc. — whatever this repo uses) to find the start/test/build command, then use the bash tool to run it and confirm the project works. A process that stays running (a server) counts as success. Report concisely whether the project runs and what command you used.',
+        prompt: `Start the project and confirm it runs. This is an isolated copy of the repository (your cwd). Use bash to run the appropriate command — check the project manifest (package.json, pyproject.toml, Cargo.toml, Makefile, etc.) for the start/dev/test/build script and use that. Report the exact command and whether it succeeded.`,
         temperature: 0,
         tools: vTools,
         stopWhen: stepCountIs(5),

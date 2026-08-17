@@ -162,6 +162,10 @@ where it is due:
 - **[Freebuff2API](https://github.com/Quorinex/Freebuff2API)** (MIT) — the
   optional local Freebuff proxy, vendored under [`freebuff/`](freebuff/README.md),
   which exposes Freebuff's free models to any OpenAI-compatible client.
+- **[genai-prices](https://github.com/pydantic/genai-prices)** by Pydantic
+  (MIT) — the pricing catalog behind the battle cost estimates: the
+  `@pydantic/genai-prices` package (bundled data + model matching) is the
+  fallback for models without curated rates.
 - **[mini-coding-agent](https://github.com/michaelmov/mini-coding-agent)** by
   Michael Movsesov — the agentic loop (read → think → act → verify) the
   harness is modeled on, wired to the Vercel [AI SDK](https://ai-sdk.dev/)

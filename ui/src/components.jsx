@@ -144,8 +144,8 @@ export function MetricPills({ result, best }) {
     { icon: 'i-bolt', key: 'fast', label: 'total time — request to finish', value: totalMs != null ? fmtDur(totalMs) : live ? '…' : '—', best: isBest('fast') },
     { icon: 'i-clock', key: 'ttft', label: 'time to first token', value: result.ttftMs != null ? fmtDur(result.ttftMs) : live ? '…' : '—', best: isBest('ttft') },
     { icon: 'i-clock-bolt', key: 'gen', label: 'generation time — first to last token', value: live ? '—' : gen != null ? fmtDur(gen) : '—', best: isBest('gen') },
-    { icon: 'i-down', key: 'in', label: 'input tokens', value: result.inputTokens != null ? `${fmtInt(result.inputTokens)}${live ? ' est.' : ''}` : live ? fmtInt(estTokens(result.output)) : '—', best: false },
-    { icon: 'i-up', key: 'out', label: 'output tokens', value: result.outputTokens != null ? `${fmtInt(result.outputTokens)}${live ? ' est.' : ''}` : live ? fmtInt(estTokens(result.output)) : '—', best: false },
+    { icon: 'i-down', key: 'in', label: 'input tokens', value: result.inputTokens != null ? `${fmtInt(result.inputTokens)}${result.tokensEstimated || live ? ' est.' : ''}` : live ? fmtInt(estTokens(result.output)) : '—', best: false },
+    { icon: 'i-up', key: 'out', label: 'output tokens', value: result.outputTokens != null ? `${fmtInt(result.outputTokens)}${result.tokensEstimated || live ? ' est.' : ''}` : live ? fmtInt(estTokens(result.output)) : '—', best: false },
     { icon: 'i-gauge', key: 'tput', label: 'throughput — output tokens/sec', value: tput > 0 ? `${fmtRate(tput)} t/s` : '—', best: isBest('tput') },
     { icon: 'i-coin', key: 'cheap', label: 'cost (estimate)', value: result.cost != null ? `${fmtCost(result.cost)} est.` : '—', best: isBest('cheap') },
     // Act tasks run the project automatically after the agent's changes —
@@ -211,7 +211,7 @@ export function dotColor(state) {
   return 'bg-emerald-400';
 }
 
-export function ResultCard({ panel, result, context, viewMode, onViewMode, blind, alias, best, repoName }) {
+export function ResultCard({ panel, result, context, viewMode, onViewMode, blind, alias, best, repoName, enterFrom = 'left' }) {
   const provider = getProvider(panel.provider);
   // Hidden identity = blind is enabled and not yet revealed.
   const hidden = blind?.enabled && !blind?.revealed;
@@ -227,7 +227,7 @@ export function ResultCard({ panel, result, context, viewMode, onViewMode, blind
 
   return (
     <article
-      className={`aba-card-in result-card flex flex-col overflow-hidden rounded-2xl border bg-[var(--color-panel)] ${
+      className={`${enterFrom === 'right' ? 'aba-slide-in-right' : 'aba-slide-in-left'} result-card flex flex-col overflow-hidden rounded-2xl border bg-[var(--color-panel)] ${
         !locked && panel.acc ? 'border-[var(--color-accent)]/45 shadow-[0_0_0_1px_var(--color-accent)/15,0_10px_30px_-18px_var(--color-accent)/35]' : 'border-[var(--color-line)]'
       }`}
     >

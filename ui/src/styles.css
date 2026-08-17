@@ -322,6 +322,36 @@
   animation: aba-rise 0.32s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
+/* History-panel-style entrance — slide + fade in from the side, same motion
+   as the battle-history drawer. The two battle cards mirror it: the left
+   card comes in from the left, the right card from the right. */
+@keyframes aba-slide-in-left {
+  from {
+    opacity: 0;
+    transform: translateX(-2.5rem);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+@keyframes aba-slide-in-right {
+  from {
+    opacity: 0;
+    transform: translateX(2.5rem);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+.aba-slide-in-left {
+  animation: aba-slide-in-left 0.28s ease-out both;
+}
+.aba-slide-in-right {
+  animation: aba-slide-in-right 0.28s ease-out both;
+}
+
 @keyframes aba-fade-in {
   from {
     opacity: 0;
@@ -399,6 +429,27 @@ body.battle-running::after {
   z-index: 101;
   pointer-events: none;
   animation: aba-spark-cross 2s linear infinite;
+}
+
+/* Blind-mode shuffle — the panel cards play a quick swap flip while the
+   aliases are re-assigned, and the shuffle icon spins once. */
+@keyframes aba-shuffle-swap {
+  0%   { transform: translateX(0) rotate(0); opacity: 1; }
+  25%  { transform: translateX(7px) rotate(1.4deg); opacity: 0.55; }
+  50%  { transform: translateX(-7px) rotate(-1.4deg); opacity: 0.3; }
+  75%  { transform: translateX(3px) rotate(0.7deg); opacity: 0.7; }
+  100% { transform: translateX(0) rotate(0); opacity: 1; }
+}
+.shuffling .result-card {
+  animation: aba-shuffle-swap 0.55s ease-in-out;
+}
+@keyframes aba-spin-once {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+.aba-spin {
+  display: inline-block;
+  animation: aba-spin-once 0.6s ease-in-out;
 }
 
 @media (max-width: 639px) {
