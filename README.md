@@ -171,15 +171,17 @@ where it is due:
   Agent Skills (https://agentskills.io/), and MCP
   (https://modelcontextprotocol.io/).
 
-<!-- tags: midudev https://github.com/midudev, michaelmov https://github.com/michaelmov/mini-coding-agent, Quorinex https://github.com/Quorinex/Freebuff2API, CodebuffAI https://github.com/CodebuffAI/freebuff -->
+<!-- tags: midudev https://github.com/midudev, michaelmov https://github.com/michaelmov/mini-coding-agent, Quorinex https://github.com/Quorinex/Freebuff2API, CodebuffAI https://github.com/CodebuffAI/freebuff, anomalyco https://github.com/anomalyco/opencode -->
 
-### Special thanks to Freebuff 💜
+### Special thanks to Freebuff 💜 and OpenCode 💜
 
-I built most of ABA with [Freebuff](https://freebuff.com/?ref=ref-0f42f217-e7d8-472f-b137-ca83dacb992b) ([GitHub](https://github.com/CodebuffAI/freebuff)). It’s free, no API keys, no subscription — just models you can actually use. For a solo developer in the Dominican Republic, that made a real difference. The design, the tests, even the UI iterations were shaped with Freebuff running locally.
+I built most of ABA with [Freebuff](https://freebuff.com/?ref=ref-0f42f217-e7d8-472f-b137-ca83dacb992b) ([GitHub](https://github.com/CodebuffAI/freebuff)). It's free, no API keys, no subscription — just models you can actually use. For a solo developer in the Dominican Republic, that made a real difference. The design, the tests, even the UI iterations were shaped with Freebuff running locally.
 
-> A note to the Freebuff team: thank you for making this possible. From the Dominican Republic: we need more models. Keep them coming. 🌎💜
+I also spent countless hours with [OpenCode](https://opencode.ai) ([GitHub](https://github.com/anomalyco/opencode)) — the open source coding agent that runs in your terminal, supports 75+ providers, and includes free models out of the box. OpenCode made it possible to prototype, test, and iterate on ABA without spending a dime. The same spirit of making AI accessible to everyone.
 
-<!-- tags: Freebuff https://github.com/CodebuffAI/freebuff -->
+> A note to the Freebuff and OpenCode teams: thank you for making this possible. From the Dominican Republic: keep bringing more powerful models to our people. 🌎💜
+
+<!-- tags: Freebuff https://github.com/CodebuffAI/freebuff, OpenCode https://github.com/anomalyco/opencode -->
 
 ### To the open source community
 
