@@ -44,22 +44,34 @@ const MODELS_API = {
 const EXCLUDE_MODEL =
   /embedding|embed|rerank|tts|audio|image|video|moderation|whisper|transcrib|realtime|dall|search/i;
 
+// Live model rows are { id, tools } — `tools` is the provider's own flag for
+// tool-calling support (true | false), or null when the provider's /models
+// endpoint doesn't say (assume capable). OpenRouter exposes it as
+// `supported_parameters.tools` — the dynamic source that keeps the act-task
+// gate honest without hardcoding model names that go stale.
 function parseOpenAIModels(json) {
   const rows = Array.isArray(json?.data) ? json.data : Array.isArray(json?.models) ? json.models : [];
   return rows
-    .map((m) => String(m?.id || m?.name || ''))
-    .filter(Boolean)
-    .filter((id) => !EXCLUDE_MODEL.test(id))
-    .sort((a, b) => a.localeCompare(b));
+    .map((m) => {
+      const sp = m?.supported_parameters;
+      // OpenRouter's supported_parameters is an ARRAY of supported parameter
+      // names — a model that doesn't list 'tools' can't call tools (image,
+      // content-safety and some reasoning models). Older format: object with
+      // `tools: false`. Either way, absence ⇒ no tool calling; anything else
+      // stays null (unknown → assume capable).
+      const noTools = Array.isArray(sp) ? !sp.includes('tools') : sp?.tools === false;
+      return { id: String(m?.id || m?.name || ''), tools: noTools ? false : null };
+    })
+    .filter((m) => m.id && !EXCLUDE_MODEL.test(m.id))
+    .sort((a, b) => a.id.localeCompare(b.id));
 }
 
 function parseAnthropicModels(json) {
   const rows = Array.isArray(json?.data) ? json.data : [];
   return rows
-    .map((m) => String(m?.id || ''))
-    .filter(Boolean)
-    .filter((id) => !EXCLUDE_MODEL.test(id))
-    .sort((a, b) => a.localeCompare(b));
+    .map((m) => ({ id: String(m?.id || ''), tools: null }))
+    .filter((m) => m.id && !EXCLUDE_MODEL.test(m.id))
+    .sort((a, b) => a.id.localeCompare(b.id));
 }
 
 /**
@@ -92,8 +104,8 @@ export async function fetchProviderModels(providerId, key) {
     throw new Error(body.error || `HTTP ${res.status} ${res.statusText}`);
   }
   const json = await res.json();
-  const ids = cfg.kind === 'anthropic' ? parseAnthropicModels(json) : parseOpenAIModels(json);
-  return cfg.toolFilter ? ids.filter(cfg.toolFilter) : ids;
+  const rows = cfg.kind === 'anthropic' ? parseAnthropicModels(json) : parseOpenAIModels(json);
+  return cfg.toolFilter ? rows.filter((m) => cfg.toolFilter(m.id)) : rows;
 }
 
 // Providers whose model list can be fetched without an API key (their
@@ -241,6 +253,36 @@ export const PROVIDERS = [
 
 export function getProvider(id) {
   return PROVIDERS.find((p) => p.id === id) || PROVIDERS[0];
+}
+
+/**
+ * Flat model-id list for a provider — live rows ({ id, tools }) or the
+ * static fallback strings. Keeps every dropdown a plain array of ids.
+ */
+export function modelIdList(providerId, live) {
+  const src = live && live.length ? live : getProvider(providerId).models;
+  return (src || []).map((m) => (typeof m === 'string' ? m : m.id));
+}
+
+/**
+ * True when a model can run 'act' tasks — the harness passes it file-edit
+ * tools (write_file, delete_file, bash), so it needs tool-calling support.
+ * Resolution order (dynamic first, manual only as fallback):
+ *   1. live capability from the provider's /models endpoint
+ *      (OpenRouter supported_parameters.tools — stays current over time)
+ *   2. provider-level override (`toolCalling` on the provider config)
+ *   3. assume capable (all SDK-backed models in the lists support tools)
+ */
+export function modelTools(providerId, live, modelId) {
+  const src = live && live.length ? live : null;
+  if (src) {
+    const found = src.find((m) => (typeof m === 'string' ? m === modelId : m.id === modelId));
+    if (found && typeof found === 'object' && found.tools != null) return found.tools;
+  }
+  const p = getProvider(providerId);
+  if (p.toolCalling === false) return false;
+  if (typeof p.toolCalling === 'function') return p.toolCalling(modelId);
+  return true;
 }
 
 /**

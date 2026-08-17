@@ -62,6 +62,11 @@ export function saveReport(report) {
   return request('/api/report', { method: 'POST', body: JSON.stringify(report) });
 }
 
+/** Load a saved battle report (reopening a finished run from history). */
+export function loadReport(id) {
+  return request(`/api/report?id=${encodeURIComponent(id)}`);
+}
+
 /** Delete a battle — removes its isolated sandboxes and saved report. */
 export function deleteBattle(id) {
   return request('/api/battles/delete', { method: 'POST', body: JSON.stringify({ id }) });

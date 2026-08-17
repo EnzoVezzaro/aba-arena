@@ -11,6 +11,7 @@
  *                       { repo, baseContext, accContext }
  *   POST /api/agent/run → runs the agent harness inside a panel sandbox
  *                       (plan/act + "start the project" verification)
+ *   GET  /api/report  → ?id=<battleId> loads a saved battle report
  *   POST /api/report  → persists a finished battle report as JSON
  *
  * LLM calls happen server-side through the agent harness (harness.cjs),
@@ -1013,8 +1014,23 @@ async function handleApi(req, res, url) {
         res.end('{"type":"error","message":"Timed out after 240s — the provider did not respond."}\n');
       }
     }, 240000);
+    // Track whether the harness already emitted its own {type:'error'} event
+    // (e.g. the provider rejected the request). If it did, the generic
+    // "harness exited with code N" fallback below must NOT be sent — it would
+    // overwrite the real message client-side (the client keeps the LAST error
+    // event). The generic line is only for crashes with no explanation
+    // (SIGKILL, uncaught throw, …).
+    let outBuf = '';
+    let harnessErrored = false;
     child.stdout.on('data', (d) => {
       if (!closed) res.write(d);
+      outBuf += String(d);
+      let idx;
+      while ((idx = outBuf.indexOf('\n')) >= 0) {
+        const line = outBuf.slice(0, idx);
+        outBuf = outBuf.slice(idx + 1);
+        if (line.includes('"type":"error"')) harnessErrored = true;
+      }
     });
     child.stderr.on('data', (d) => {
       if (!closed) res.write(JSON.stringify({ type: 'stderr', text: String(d) }) + '\n');
@@ -1023,7 +1039,9 @@ async function handleApi(req, res, url) {
       clearTimeout(hardTimer);
       if (!closed) {
         closed = true;
-        if (code !== 0) res.write(JSON.stringify({ type: 'error', message: `harness exited with code ${code}` }) + '\n');
+        if (code !== 0 && !harnessErrored) {
+          res.write(JSON.stringify({ type: 'error', message: `harness exited with code ${code}` }) + '\n');
+        }
         res.end();
       }
     });
@@ -1067,14 +1085,37 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  // GET a saved battle report so a finished run can be reopened from the
+  // history panel (click a run → see the battle). Reports are keyed by the
+  // same battleId that names the battle's sandbox + history entry.
+  if (method === 'GET' && url.pathname === '/api/report') {
+    const id = String(url.searchParams.get('id') || '');
+    if (!/^[a-z0-9]+$/i.test(id)) {
+      sendJson(res, 400, { error: 'invalid battle id' });
+      return;
+    }
+    const file = path.join(SANDBOX_DIR, 'reports', `battle-${id}.json`);
+    if (!fs.existsSync(file)) {
+      sendJson(res, 404, { error: `no saved report for battle ${id}` });
+      return;
+    }
+    try {
+      sendJson(res, 200, JSON.parse(fs.readFileSync(file, 'utf8')));
+    } catch (err) {
+      sendJson(res, 400, { error: `cannot read report: ${err.message}` });
+    }
+    return;
+  }
+
   if (method === 'POST' && url.pathname === '/api/report') {
     try {
       const body = await readBody(req);
       const dir = path.join(SANDBOX_DIR, 'reports');
       fs.mkdirSync(dir, { recursive: true });
       // Name the report by battleId so deleting a history run can remove its
-      // sandbox AND its saved report together.
-      const id = /^[a-z0-9]+$/i.test(body.battleId || '') ? body.battleId : `b${Date.now().toString(36)}`;
+      // sandbox AND its saved report together. Fall back to the battleId
+      // nested in the repo payload (the UI sends it there for the auto-save).
+      const id = /^[a-z0-9]+$/i.test(body.battleId || '') ? body.battleId : /^[a-z0-9]+$/i.test(body.repo?.battleId || '') ? body.repo.battleId : `b${Date.now().toString(36)}`;
       const file = path.join(dir, `battle-${id}.json`);
       fs.writeFileSync(file, JSON.stringify(body, null, 2));
       sendJson(res, 200, { ok: true, file });

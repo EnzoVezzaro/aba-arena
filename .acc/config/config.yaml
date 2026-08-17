@@ -4,7 +4,22 @@
 # still works. See docs/02-repository-structure.md.
 schema_version: 1
 
-# Ignored from scans (filesystem walk, diagnostics, graph, build):
-# the built UI bundle is gitignored build output, not project source.
+# Language analyzers. The defaults cover rust/typescript/go/python; this is
+# a JavaScript project (src/*.cjs, ui/src/*.jsx, tests, configs), so enable
+# the javascript analyzer too — it clears the ACC040 "no analyzer for
+# .js/.jsx/.mjs/.cjs" infos instead of leaving the whole codebase uncovered.
+language_analyzers:
+  javascript: true
+
+# Ignored from scans (filesystem walk, diagnostics, graph, build). Only
+# non-source entries: the built UI bundle (gitignored build output), binary
+# font/icon assets, the env template, and Go dependency metadata (the same
+# class as *.lock, which ACC skips by default). Real source files (ui/index.html,
+# ui/src/styles.css) stay visible — ACC040 infos for them are honest.
 ignore:
   - ui/dist/
+  - ui/public/fonts/
+  - ui/public/favicon.svg
+  - .env.example
+  - freebuff/go.mod
+  - freebuff/go.sum

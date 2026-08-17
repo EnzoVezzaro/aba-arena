@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { githubMe, githubRepos } from './api.js';
-import { PROVIDERS, getProvider, loadKeys, saveKey, isFreeModel } from './providers.js';
+import { PROVIDERS, getProvider, loadKeys, saveKey, isFreeModel, modelIdList, modelTools } from './providers.js';
 import {
   fmtDur,
   fmtInt,
@@ -382,8 +382,40 @@ export function ResultCard({ panel, result, context, viewMode, onViewMode, blind
                 // (including the agent's edits), browsable live.
                 <CodeSandbox panel={panel} repoName={repoName} />
               ) : (
-                <div className="h-full overflow-auto p-3.5 text-[12px] leading-relaxed text-[var(--color-ink-dim)]">
-                  <div className="whitespace-pre-wrap break-words">{answer || result.output}</div>
+                /* Finished: the Answer panel KEEPS the sandbox terminal — the
+                   same live view from the run, now frozen (no caret), with the
+                   final answer appended as the last block. The plain prose
+                   view only shows when the run produced no terminal log. */
+                <div className="h-full overflow-auto bg-[#0b0f14] p-3 font-mono text-[11px] leading-[1.7] text-[#c9d1d9]">
+                  <div className="flex items-center gap-1.5 pb-2 text-[9px] uppercase tracking-[0.18em] text-[#8b949e]">
+                    <span className="size-1.5 rounded-full bg-emerald-400" />
+                    <span>sandbox terminal{repoName ? ` · ${repoName}` : ''}</span>
+                  </div>
+                  {(result?.term || []).length > 0 ? (
+                    (result.term).map((l, i) => (
+                      <div
+                        key={i}
+                        className={
+                          l.kind === 'cmd'
+                            ? 'text-[#79c0ff]'
+                            : l.kind === 'reasoning'
+                              ? 'italic text-[#8b949e]'
+                              : 'whitespace-pre-wrap break-words'
+                        }
+                      >
+                        {l.kind === 'cmd' && <span className="select-none text-[#3fb950]">$ </span>}
+                        {l.kind === 'reasoning' && <span className="select-none text-[#8b949e]">· </span>}
+                        {l.text}
+                      </div>
+                    ))
+                  ) : (
+                    <div className="whitespace-pre-wrap break-words text-[#e6edf3]">{answer || result.output}</div>
+                  )}
+                  {result?.output ? (
+                    <div className="mt-1.5 whitespace-pre-wrap break-words border-t border-[#21262d] pt-1.5 text-[#e6edf3]">
+                      {result.output}
+                    </div>
+                  ) : null}
                 </div>
               )}
             </div>
@@ -399,7 +431,7 @@ export function ResultCard({ panel, result, context, viewMode, onViewMode, blind
 /* models, which can be 300+ entries).                                      */
 /* ------------------------------------------------------------------------ */
 
-export function SearchSelect({ value, options, onChange, placeholder = 'Search…', ariaLabel, isFree }) {
+export function SearchSelect({ value, options, onChange, placeholder = 'Search…', ariaLabel, isFree, toolUse, warn }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [highlight, setHighlight] = useState(0);
@@ -486,12 +518,19 @@ export function SearchSelect({ value, options, onChange, placeholder = 'Search�
         aria-label={ariaLabel}
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
-        className="arena-select flex min-h-9 w-full items-center justify-between gap-2 rounded-lg border border-[var(--color-line)] px-2.5 text-left text-[12px] text-[var(--color-ink)] outline-none transition-colors hover:border-[var(--color-line-hi)] focus:border-[var(--color-accent)]/50"
+        className={`arena-select flex min-h-9 w-full items-center justify-between gap-2 rounded-lg border px-2.5 text-left text-[12px] text-[var(--color-ink)] outline-none transition-colors hover:border-[var(--color-line-hi)] focus:border-[var(--color-accent)]/50 ${
+          warn ? 'border-red-500/50' : 'border-[var(--color-line)]'
+        }`}
       >
         <span className="min-w-0 flex-1 truncate">{value || placeholder}</span>
         {isFree && value && isFree(value) && (
           <span className="shrink-0 rounded border border-emerald-500/40 bg-emerald-500/10 px-1 py-px text-[8px] font-semibold uppercase tracking-wide text-emerald-600">
             free
+          </span>
+        )}
+        {toolUse && value && toolUse(value) === false && (
+          <span className="shrink-0 rounded border border-red-500/40 bg-red-500/10 px-1 py-px text-[8px] font-semibold uppercase tracking-wide text-red-400">
+            no tools
           </span>
         )}
         <Icon name="chevron" className={`size-3.5 shrink-0 text-[var(--color-ink-faint)] transition-transform ${open ? 'rotate-180' : ''}`} />
@@ -549,6 +588,11 @@ export function SearchSelect({ value, options, onChange, placeholder = 'Search�
                       free
                     </span>
                   )}
+                  {toolUse && toolUse(o) === false && (
+                    <span className="shrink-0 rounded border border-red-500/40 bg-red-500/10 px-1 py-px text-[8px] font-semibold uppercase tracking-wide text-red-400" title="This model cannot call tools — act tasks will be blocked">
+                      no tools
+                    </span>
+                  )}
                   {o === value && <Icon name="check" className="size-3.5 shrink-0 text-[var(--color-accent)]" />}
                 </button>
               ))}
@@ -574,11 +618,16 @@ export function PanelConfig({ panel, onPanel, liveModels, modelsLoading, onCopyA
   );
   const provider = getProvider(panel.provider);
   const configured = !provider.needsKey || !!(panel.apiKey || keys[panel.provider]);
-  // Live model list from the provider API when available; static fallback otherwise.
-  const models =
-    liveModels[panel.provider] && liveModels[panel.provider].length
-      ? liveModels[panel.provider]
-      : provider.models;
+  // Live model list from the provider API when available; static fallback
+  // otherwise. Live rows are { id, tools } objects — flatten to ids for the
+  // dropdown and resolve tool-calling capability for the act gate.
+  const models = modelIdList(panel.provider, liveModels[panel.provider]);
+  // Tool-calling capability is only known when the LIVE model list loaded
+  // (the provider flags it) — the static fallback has no capability data, so
+  // the dropdown only marks models when there is a real signal.
+  const hasLiveModels = !!(liveModels[panel.provider] && liveModels[panel.provider].length);
+  const noToolCalling = hasLiveModels && !modelTools(panel.provider, liveModels[panel.provider], panel.model);
+  const toolUse = (m) => (hasLiveModels ? modelTools(panel.provider, liveModels[panel.provider], m) : null);
   const loading = !!modelsLoading[panel.provider];
   // If the current provider lost its key, fall back to the first configured one.
   const effectiveProvider = available.some((p) => p.id === panel.provider)
@@ -630,12 +679,14 @@ export function PanelConfig({ panel, onPanel, liveModels, modelsLoading, onCopyA
             onChange={(label) => {
               const next = available.find((p) => p.label === label)?.id || effectiveProvider;
               const live = liveModels[next] && liveModels[next].length ? liveModels[next] : getProvider(next).models;
-              onPanel({ ...panel, provider: next, model: live[0] || '' });
+              onPanel({ ...panel, provider: next, model: modelIdList(next, live)[0] || '' });
             }}
           />
         </label>
         <label className="block">
-          <span className="mb-1 flex items-center gap-1 text-[10px] uppercase tracking-[0.1em] text-[var(--color-ink-faint)]">
+          <span
+            className={`mb-1 flex items-center gap-1 text-[10px] uppercase tracking-[0.1em] ${noToolCalling ? 'text-red-400' : 'text-[var(--color-ink-faint)]'}`}
+          >
             Model
             {loading && <span className="inline-block size-3 rounded-full border-2 border-[var(--color-line-hi)] border-t-[var(--color-accent)] spin" />}
           </span>
@@ -645,10 +696,18 @@ export function PanelConfig({ panel, onPanel, liveModels, modelsLoading, onCopyA
             placeholder="Select model…"
             ariaLabel="Select model"
             isFree={(m) => isFreeModel(panel.provider, m)}
+            toolUse={toolUse}
+            warn={noToolCalling}
             onChange={(m) => onPanel({ ...panel, model: m })}
           />
         </label>
       </div>
+      {noToolCalling && (
+        <p className="mt-2 flex items-start gap-1.5 text-[10px] leading-relaxed text-red-400" role="alert">
+          <Icon name="alert" className="mt-0.5 size-3 shrink-0" />
+          <span>This model has no tool calling — act tasks are blocked until you pick a model that supports it.</span>
+        </p>
+      )}
       <p className="mt-2 text-[10px] text-[var(--color-ink-faint)]">
         {loading
           ? 'loading models from provider…'
@@ -1198,7 +1257,7 @@ export function KeyModal({ open, onClose, onSaved, freebuffRunning }) {
 /* History drawer (isbetter.ai history drawer)                               */
 /* ------------------------------------------------------------------------ */
 
-export function HistoryDrawer({ open, history, onClose, onClear, onDelete, onStop, onResume }) {
+export function HistoryDrawer({ open, history, onClose, onClear, onDelete, onStop, onResume, onOpen }) {
   const [deleting, setDeleting] = useState(null); // history id currently being removed
   const { mounted, visible } = useOverlay(open, 240);
   if (!mounted) return null;
@@ -1270,7 +1329,14 @@ export function HistoryDrawer({ open, history, onClose, onClear, onDelete, onSto
                           <span className="truncate">{h.repoName}</span>
                         </button>
                       ) : (
-                        <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-[var(--color-ink)]">{h.repoName}</span>
+                        <button
+                          onClick={() => onOpen?.(h)}
+                          className="flex min-w-0 flex-1 items-center gap-1.5 text-left text-[12px] font-medium text-[var(--color-ink)] transition-colors hover:text-[var(--color-accent)]"
+                          title="View this battle"
+                        >
+                          <Icon name="eye" className="size-3.5 shrink-0 text-[var(--color-ink-faint)]" />
+                          <span className="truncate">{h.repoName}</span>
+                        </button>
                       )}
                       {running ? (
                         <span className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-[var(--color-accent)]/40 bg-[var(--color-accent)]/10 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-[var(--color-accent)]">

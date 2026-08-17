@@ -1,6 +1,6 @@
 {
   "name": "acc-battle-arena",
-  "version": "0.2.0",
+  "version": "0.3.0-dev-stable",
   "description": "ABA — ACC Battle Arena: side-by-side agent benchmarks (ACC vs no-ACC) with a live Vite battle arena. Real coding agents run inside isolated sandboxes with plan/act tasks and automatic project verification. Standalone; the ACC framework never depends on it.",
   "license": "MIT",
   "main": "src/index.cjs",
@@ -20,6 +20,10 @@
     "ui": "node src/index.cjs",
     "build:ui": "npm --prefix ui install && npm --prefix ui run build",
     "dev:ui": "npm --prefix ui run dev",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:ui": "vitest run --reporter=verbose",
     "prepare": "node -e \"if (!require('fs').existsSync('ui/dist/index.html')) { const { execSync } = require('child_process'); execSync('npm --prefix ui install --no-audit --no-fund', { stdio: 'inherit' }); execSync('npm --prefix ui run build', { stdio: 'inherit' }); }\""
   },
   "engines": {
@@ -47,5 +51,11 @@
   "bugs": {
     "url": "https://github.com/EnzoVezzaro/aba-arena/issues"
   },
-  "homepage": "https://github.com/EnzoVezzaro/aba-arena#readme"
+  "homepage": "https://github.com/EnzoVezzaro/aba-arena#readme",
+  "devDependencies": {
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.2",
+    "jsdom": "^30.0.1",
+    "vitest": "^4.1.10"
+  }
 }

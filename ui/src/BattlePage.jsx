@@ -9,7 +9,7 @@ import {
   computeWinners,
 } from './arena.js';
 import { Icon, ResultCard, PENDING_BATTLE_KEY, loadHistory, saveHistory } from './components.jsx';
-import { loadRepo, saveReport, sandboxTree, runAgent } from './api.js';
+import { loadRepo, saveReport, loadReport, sandboxTree, runAgent } from './api.js';
 import Timeline from './Timeline.jsx';
 import IconSprite from './icons.jsx';
 import CodeExplorer from './CodeExplorer.jsx';
@@ -61,9 +61,13 @@ function shuffle(items) {
 }
 
 export default function BattlePage({ onBack }) {
-  const [battle, setBattle] = useState(loadPendingBattle);
+  // ?battle=<id> replays a FINISHED run from history: results come from the
+  // saved report instead of a live run, so the pending battle is ignored.
+  const [viewReportId] = useState(() => new URLSearchParams(window.location.search).get('battle'));
+  const [viewError, setViewError] = useState('');
+  const [battle, setBattle] = useState(() => (viewReportId ? null : loadPendingBattle()));
   const [results, setResults] = useState([]);
-  const [battleStatus, setBattleStatus] = useState('idle'); // idle | running | done | stopped
+  const [battleStatus, setBattleStatus] = useState(viewReportId ? 'loading' : 'idle'); // idle | running | done | stopped | loading
   const [viewMode, setViewMode] = useState('answer');
   // Per-card view overrides — each sandbox's Code/Answer buttons only affect
   // that card. Key: `${taskIndex}:${panelId}` → 'answer' | 'code'.
@@ -336,38 +340,40 @@ export default function BattlePage({ onBack }) {
 
     for (let i = 0; i < tasks.length; i++) {
       const task = tasks[i];
-      await Promise.all(
-        panels.map(async (panel) => {
-          if (stoppedRef.current) return;
-          const context = panel.acc ? repo.accContext : repo.baseContext;
-          const live = { status: 'running', output: '', term: [], _startedAt: Date.now() };
-          next[i].panels[panel.id] = live;
-          setPanelResult(i, panel.id, live);
-          try {
-            const out = await runPanel(
-              panel,
-              context,
-              task,
-              (output) => {
-                live.output = output;
-                setPanelResult(i, panel.id, { status: 'running', output });
-              },
-              (patch) => {
-                Object.assign(live, patch);
-                setPanelResult(i, panel.id, patch);
-              }
-            );
-            next[i].panels[panel.id] = out;
-            setPanelResult(i, panel.id, out);
-          } catch (err) {
-            const msg = String(err?.message || err?.name || 'failed');
-            const aborted = err?.name === 'AbortError' || /aborted|timed out|timeout|no response|stopped/i.test(msg);
-            const errResult = { status: 'error', error: aborted ? msg : `Provider error: ${msg}` };
-            next[i].panels[panel.id] = errResult;
-            setPanelResult(i, panel.id, errResult);
-          }
-        })
-      );
+      // Panels run ONE AT A TIME (never in parallel) — free/rate-limited
+      // providers (NVIDIA NIM, …) reject simultaneous requests with 429 Too
+      // Many Requests. The ACC panel finishes its task before the plain panel
+      // starts the same one.
+      for (const panel of panels) {
+        if (stoppedRef.current) break;
+        const context = panel.acc ? repo.accContext : repo.baseContext;
+        const live = { status: 'running', output: '', term: [], _startedAt: Date.now() };
+        next[i].panels[panel.id] = live;
+        setPanelResult(i, panel.id, live);
+        try {
+          const out = await runPanel(
+            panel,
+            context,
+            task,
+            (output) => {
+              live.output = output;
+              setPanelResult(i, panel.id, { status: 'running', output });
+            },
+            (patch) => {
+              Object.assign(live, patch);
+              setPanelResult(i, panel.id, patch);
+            }
+          );
+          next[i].panels[panel.id] = out;
+          setPanelResult(i, panel.id, out);
+        } catch (err) {
+          const msg = String(err?.message || err?.name || 'failed');
+          const aborted = err?.name === 'AbortError' || /aborted|timed out|timeout|no response|stopped/i.test(msg);
+          const errResult = { status: 'error', error: aborted ? msg : `Provider error: ${msg}` };
+          next[i].panels[panel.id] = errResult;
+          setPanelResult(i, panel.id, errResult);
+        }
+      }
       if (stoppedRef.current) break;
     }
     if (!stoppedRef.current) persistBattle(next);
@@ -412,6 +418,17 @@ export default function BattlePage({ onBack }) {
       verdict: accWins > comparable.length / 2 ? 'ACC ahead' : accWins < comparable.length / 2 ? 'no-ACC ahead' : 'tie',
       status: 'done',
     });
+    // Save the full report server-side (keyed by battleId) so this run can be
+    // reopened from the history panel — click a run, see the battle. Best
+    // effort: the run already lives in local history if this fails.
+    saveReport({
+      battleId: repo.battleId || id,
+      repo,
+      panels,
+      tasks,
+      results: final,
+      savedAt: new Date().toISOString(),
+    }).catch(() => {});
   }
 
   /* --------------------------- summary ---------------------------------- */
@@ -456,7 +473,8 @@ export default function BattlePage({ onBack }) {
 
   async function handleSaveReport() {
     try {
-      const r = await saveReport({ repo, panels, tasks, results, savedAt: new Date().toISOString() });
+      // Name the report by battleId so the history panel can reopen it.
+      const r = await saveReport({ battleId: repo.battleId || battle?.id, repo, panels, tasks, results, savedAt: new Date().toISOString() });
       setSavedReport(r.file);
     } catch (e) {
       setSavedReport(`failed: ${e.message}`);
@@ -468,6 +486,22 @@ export default function BattlePage({ onBack }) {
   useEffect(() => {
     // Guard against React StrictMode double-invoking the effect in dev.
     if (startedRef.current) return;
+    // Replay mode: ?battle=<id> — load the saved report and render it as a
+    // completed battle. Never starts a live run.
+    if (viewReportId) {
+      startedRef.current = true;
+      loadReport(viewReportId)
+        .then((r) => {
+          if (!r?.repo) throw new Error('saved report is missing its repository');
+          const b = { id: viewReportId, repo: r.repo, panels: r.panels || [], tasks: r.tasks || [] };
+          setBattle(b);
+          battleRef.current = b;
+          setResults(r.results || []);
+          setBattleStatus('done');
+        })
+        .catch((err) => setViewError(err.message || String(err)));
+      return;
+    }
     if (repo && battleStatus === 'idle') {
       startedRef.current = true;
       // The sandbox APIs need the repo loaded server-side (server state is
@@ -499,6 +533,7 @@ export default function BattlePage({ onBack }) {
   /* --------------------------- render ----------------------------------- */
 
   if (!battle || !repo) {
+    const viewing = !!viewReportId;
     return (
       <div className="grid-bg min-h-screen">
         <IconSprite />
@@ -509,7 +544,11 @@ export default function BattlePage({ onBack }) {
           <div className="max-w-sm">
             <p className="font-pixel text-[13px] tracking-[0.1em] text-[var(--color-ink-dim)]">battle not found</p>
             <p className="mt-2 text-[12px] leading-relaxed text-[var(--color-ink-faint)]">
-              There is no battle queued. Configure one in the arena first.
+              {viewing
+                ? viewError
+                  ? `Could not load this battle: ${viewError}`
+                  : 'Loading battle…'
+                : 'There is no battle queued. Configure one in the arena first.'}
             </p>
             <button onClick={onBack} className="action-primary mt-4 inline-flex items-center gap-1.5 px-4 py-2 text-[12px] font-semibold">
               <Icon name="bolt" className="size-4" />
@@ -543,7 +582,6 @@ export default function BattlePage({ onBack }) {
             </span>
             <div className="min-w-0">
               <p className="truncate text-[14px] font-bold tracking-[-0.03em] text-[var(--color-ink)]">
-                <span className="font-pixel text-[12px] font-semibold tracking-normal text-[var(--color-accent)]">acc</span>
                 <span className="ml-2">Battle</span>
               </p>
               <p className="truncate font-mono text-[10px] text-[var(--color-ink-faint)]">
@@ -853,7 +891,6 @@ export default function BattlePage({ onBack }) {
         {/* ============================== FOOTER ============================== */}
         <footer className="mt-auto flex flex-col items-start gap-3 border-t border-[var(--color-line)] py-5 text-[11px] text-[var(--color-ink-faint)] sm:flex-row sm:items-center sm:justify-between">
           <span className="flex items-center gap-1.5">
-            <span className="font-pixel text-[13px] font-semibold text-[var(--color-accent)]">acc</span>
             <span>Agent Code Context · Battle Arena —</span>
             <a
               href="https://EnzoVezzaro.github.io/agents-code-context/"

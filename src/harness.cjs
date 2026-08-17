@@ -35,7 +35,7 @@
  *                  the sandbox dir is listable. Prints {"type":"selfcheck","ok":true}.
  */
 
-const { tool, streamText } = require('ai');
+const { tool, streamText, stepCountIs } = require('ai');
 // Use the OPENAI-COMPATIBLE adapter (not @ai-sdk/openai) for custom base
 // URLs: the openai provider drops `reasoning_content` deltas (it buffers the
 // whole response into one final text-delta), so reasoning models look dead
@@ -73,16 +73,28 @@ async function streamFull(result) {
   let reasoning = '';
   let lastReasoningAt = 0;
   for await (const part of result.fullStream) {
+    // AI SDK v5: fullStream parts carry their payload in `text` (text-delta
+    // and reasoning-delta), not `textDelta` — and reasoning deltas are named
+    // 'reasoning-delta' (v4 called them 'reasoning').
+    // AI SDK v5 enqueues provider failures (HTTP 400/500, malformed
+    // responses, …) as {type:'error'} parts instead of throwing — the stream
+    // then closes NORMALLY. If we ignore the part the harness would report
+    // "done" with an empty output (silently failed run). Surface it: throw
+    // so the caller's try/catch emits {type:'error'} and exits non-zero.
+    if (part.type === 'error') {
+      const e = part.error;
+      throw e instanceof Error ? e : new Error(fmtErr(e));
+    }
     if (part.type === 'text-delta') {
       if (reasoning) {
         emit({ type: 'reasoning', text: reasoning });
         reasoning = '';
       }
-      const t = part.textDelta || '';
+      const t = part.text || '';
       output += t;
       emit({ type: 'delta', text: t });
-    } else if (part.type === 'reasoning') {
-      const t = part.textDelta || '';
+    } else if (part.type === 'reasoning-delta') {
+      const t = part.text || '';
       if (!t) continue;
       reasoning += t;
       const now = Date.now();
@@ -118,14 +130,17 @@ function renderCmd(name, args = {}) {
 // calls ($ cmd) and their results (output). The battle page renders these as
 // the sandbox terminal in the Answer panel while a panel is running.
 function emitStep(step) {
-  if (step && typeof step.reasoning === 'string' && step.reasoning.trim()) {
-    emit({ type: 'reasoning', text: step.reasoning.slice(0, 2000) });
+  // AI SDK v5 StepResult: `reasoning` is an array of parts (use reasoningText
+  // for the joined string) and tool calls/results carry `input`/`output`
+  // (v4 called them `args`/`result`).
+  if (step && typeof step.reasoningText === 'string' && step.reasoningText.trim()) {
+    emit({ type: 'reasoning', text: step.reasoningText.slice(0, 2000) });
   }
   for (const tc of step?.toolCalls || []) {
-    emit({ type: 'cmd', text: renderCmd(tc.toolName, tc.args) });
+    emit({ type: 'cmd', text: renderCmd(tc.toolName, tc.input) });
   }
   for (const tr of step?.toolResults || []) {
-    let out = typeof tr.result === 'string' ? tr.result : JSON.stringify(tr.result);
+    let out = tr.output == null ? '' : typeof tr.output === 'string' ? tr.output : JSON.stringify(tr.output);
     if (out.length > 2000) out = out.slice(0, 2000) + '\n… truncated';
     emit({ type: 'out', text: out });
   }
@@ -306,7 +321,6 @@ function createModel(kind, baseURL, apiKey) {
     name: 'aba-harness',
     baseURL: baseURL || 'https://api.openai.com/v1',
     apiKey: apiKey || 'none',
-    compatibility: 'compatible',
   });
   return provider.languageModel(process.env.ABA_MODEL);
 }
@@ -346,7 +360,9 @@ async function runAgent() {
       prompt: buildPrompt(mode, task, context),
       temperature: 0.3,
       tools,
-      maxSteps,
+      // AI SDK v5: the tool loop is controlled by stopWhen (default is 1
+      // step!) — v4's maxSteps no longer drives it.
+      stopWhen: stepCountIs(maxSteps),
       maxTokens: Number(process.env.ABA_MAX_TOKENS || 4000),
       maxRetries: 0,
       providerOptions: {
@@ -396,7 +412,7 @@ async function runAgent() {
         prompt: `Start the project and confirm it runs. This is an isolated copy of the repository (your cwd). Use bash to run the appropriate command (check package.json scripts: start, dev, test, build). Report the exact command and whether it succeeded.`,
         temperature: 0,
         tools: vTools,
-        maxSteps: 5,
+        stopWhen: stepCountIs(5),
         maxTokens: Number(process.env.ABA_MAX_TOKENS || 4000),
         maxRetries: 0,
         providerOptions: {

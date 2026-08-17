@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { PROVIDERS, getProvider, loadKeys, fetchProviderModels, PUBLIC_MODELS_PROVIDERS } from './providers.js';
+import { PROVIDERS, getProvider, loadKeys, fetchProviderModels, PUBLIC_MODELS_PROVIDERS, modelIdList, modelTools } from './providers.js';
 import { DEFAULT_TASKS } from './tasks.js';
 import { health, loadRepo, deleteBattle, deleteAllBattles, fsList } from './api.js';
 import IconSprite from './icons.jsx';
@@ -193,7 +193,7 @@ export default function App() {
         const providerId = ok ? panel.provider : available[0]?.id || 'openai';
         if (providerId !== panel.provider) changed = true;
         const live = liveModels[providerId];
-        const list = live && live.length ? live : getProvider(providerId).models;
+        const list = modelIdList(providerId, live);
         const model = ok ? panel.model : list[0] || '';
         if (model !== panel.model) changed = true;
         return { ...panel, provider: providerId, model };
@@ -378,6 +378,16 @@ export default function App() {
       setRepoError('Pick a model for every panel.');
       return;
     }
+    // Act tasks edit the code through the harness's tools — a model without
+    // tool calling can't run them. Block the battle until the user changes
+    // the model or switches those tasks to plan.
+    if (actBlocked) {
+      const who = actBlockedPanels.map((p) => p.label).join(' and ');
+      setRepoError(
+        `${who} ${actBlockedPanels.length === 1 ? "doesn't" : "don't"} support tool calling, so act tasks can't run. Change the model or switch those tasks to plan.`
+      );
+      return;
+    }
     // Snapshot the battle config so /battle can run it with realtime streaming.
     // RegExp hints don't survive JSON.stringify — store them as strings and
     // checkSuccess() rebuilds them on load.
@@ -430,6 +440,13 @@ export default function App() {
     clearPendingIfMatch(h);
   }
 
+  // Open a finished run from history: /battle?battle=<id> replays the saved
+  // report (results, timeline, summary) instead of running anything live.
+  function openHistoryBattle(h) {
+    const id = h.battleId || h.id;
+    window.location.href = `/battle?battle=${encodeURIComponent(id)}`;
+  }
+
   // If the pending (running) battle matches this history entry, drop it.
   function clearPendingIfMatch(h) {
     try {
@@ -455,6 +472,12 @@ export default function App() {
   }
 
   const accPipeline = repo?.accPipeline || [];
+
+  // Act-capability gate: act tasks need tool calling on EVERY panel (both
+  // sides run the same tasks). Offending models get red marks and run is
+  // blocked until the user changes the model or switches the task to plan.
+  const actBlockedPanels = panels.filter((p) => !modelTools(p.provider, liveModels[p.provider], p.model));
+  const actBlocked = tasks.some((t) => (t.mode || 'act') === 'act') && actBlockedPanels.length > 0;
 
   return (
     <div className="grid-bg min-h-screen">
@@ -656,9 +679,27 @@ export default function App() {
                   <p className="mb-1.5 text-[10px] uppercase tracking-[0.1em] text-[var(--color-ink-faint)]">
                     Benchmark series · {tasks.length} task{tasks.length === 1 ? '' : 's'}
                   </p>
+                  {actBlocked && (
+                    <p className="mb-2 flex items-start gap-1.5 rounded-lg border border-red-500/40 bg-red-500/[0.06] px-2.5 py-2 text-[11px] leading-relaxed text-red-400" role="alert">
+                      <Icon name="alert" className="mt-0.5 size-3.5 shrink-0" />
+                      <span>
+                        <strong className="font-semibold">{actBlockedPanels.map((p) => p.label).join(' & ')}</strong>{' '}
+                        {actBlockedPanels.length === 1 ? 'uses a model without tool calling' : 'use models without tool calling'} — act tasks
+                        are blocked. Change the model or switch the red tasks to{' '}
+                        <em className="not-italic font-semibold">plan</em>.
+                      </span>
+                    </p>
+                  )}
                   <ul className="space-y-1.5">
                     {tasks.map((t, i) => (
-                      <li key={i} className="flex items-center gap-2 rounded-lg border border-[var(--color-line)] bg-[var(--color-panel)] px-2.5 py-1.5">
+                      <li
+                        key={i}
+                        className={`flex items-center gap-2 rounded-lg border px-2.5 py-1.5 ${
+                          actBlocked && (t.mode || 'act') === 'act'
+                            ? 'border-red-500/40 bg-red-500/[0.06]'
+                            : 'border-[var(--color-line)] bg-[var(--color-panel)]'
+                        }`}
+                      >
                         <span className="font-mono text-[10px] tabular-nums text-[var(--color-ink-faint)]">{i + 1}</span>
                         <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--color-ink-dim)]">{t.title}</span>
                         <span className="flex shrink-0 items-center gap-0.5 rounded-md bg-[var(--color-panel-hi)] p-0.5">
@@ -671,7 +712,9 @@ export default function App() {
                               className={`rounded px-1.5 py-0.5 font-pixel text-[8px] uppercase tracking-[0.12em] transition-colors ${
                                 (t.mode || 'act') === m
                                   ? m === 'act'
-                                    ? 'bg-[var(--color-accent)]/20 text-[var(--color-accent)]'
+                                    ? actBlocked
+                                      ? 'bg-red-500/15 text-red-400'
+                                      : 'bg-[var(--color-accent)]/20 text-[var(--color-accent)]'
                                     : 'bg-[var(--color-line-hi)] text-[var(--color-ink)]'
                                   : 'text-[var(--color-ink-faint)] hover:text-[var(--color-ink-dim)]'
                               }`}
@@ -746,7 +789,6 @@ export default function App() {
         {/* ============================== FOOTER ============================== */}
         <footer className="mt-auto flex flex-col items-start gap-3 border-t border-[var(--color-line)] py-5 text-[11px] text-[var(--color-ink-faint)] sm:flex-row sm:items-center sm:justify-between">
           <span className="flex items-center gap-1.5">
-            <span className="font-pixel text-[13px] font-semibold text-[var(--color-accent)]">acc</span>
             <span>Agent Code Context · Battle Arena —</span>
             <a
               href="https://EnzoVezzaro.github.io/agents-code-context/"
@@ -932,6 +974,7 @@ export default function App() {
         onDelete={deleteHistoryItem}
         onStop={stopHistoryItem}
         onResume={navigateToBattle}
+        onOpen={openHistoryBattle}
       />
     </div>
   );
