@@ -1,6 +1,6 @@
 {
   "name": "acc-battle-arena",
-  "version": "0.3.5-dev-stable",
+  "version": "0.3.6",
   "description": "ABA — ACC Battle Arena: side-by-side agent benchmarks (ACC vs no-ACC) with a live Vite battle arena. Real coding agents run inside isolated sandboxes with plan/act tasks and automatic project verification. Standalone; the ACC framework never depends on it.",
   "license": "MIT",
   "main": "src/index.cjs",

@@ -322,34 +322,31 @@
   animation: aba-rise 0.32s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
-/* History-panel-style entrance — slide + fade in from the side, same motion
-   as the battle-history drawer. The two battle cards mirror it: the left
-   card comes in from the left, the right card from the right. */
+/* History-panel-style entrance — the same motion as the battle-history
+   drawer: a full sweep from 100% off-screen to 0 over 200ms ease-out. The
+   two battle cards mirror it (left card from the left edge, right card from
+   the right edge), matching the drawer's transform-only slide. */
 @keyframes aba-slide-in-left {
   from {
-    opacity: 0;
-    transform: translateX(-2.5rem);
+    transform: translateX(-100%);
   }
   to {
-    opacity: 1;
     transform: translateX(0);
   }
 }
 @keyframes aba-slide-in-right {
   from {
-    opacity: 0;
-    transform: translateX(2.5rem);
+    transform: translateX(100%);
   }
   to {
-    opacity: 1;
     transform: translateX(0);
   }
 }
 .aba-slide-in-left {
-  animation: aba-slide-in-left 0.28s ease-out both;
+  animation: aba-slide-in-left 0.2s ease-out both;
 }
 .aba-slide-in-right {
-  animation: aba-slide-in-right 0.28s ease-out both;
+  animation: aba-slide-in-right 0.2s ease-out both;
 }
 
 @keyframes aba-fade-in {

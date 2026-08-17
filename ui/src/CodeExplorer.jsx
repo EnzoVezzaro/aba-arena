@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { sandboxTree, sandboxRead } from './api.js';
-import { Icon } from './components.jsx';
+import { Icon, useOverlay } from './components.jsx';
 
 const fmtBytes = (n) =>
   n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : n >= 1024 ? `${(n / 1024).toFixed(1)} KB` : `${n} B`;
@@ -17,6 +17,10 @@ export default function CodeExplorer({ open, panel, repoName, onClose }) {
   const [selected, setSelected] = useState('');
   const [content, setContent] = useState('');
   const [loading, setLoading] = useState(false);
+  // Same enter/exit motion as the history drawer: stays mounted through the
+  // closing transition, `visible` flips one frame after opening so the CSS
+  // transition plays (slide in from the right + fade).
+  const { mounted, visible } = useOverlay(open, 240);
 
   const panelId = panel?.id || 'acc';
   const panelLabel = panel?.acc ? 'ACC' : 'no-ACC';
@@ -95,14 +99,20 @@ export default function CodeExplorer({ open, panel, repoName, onClose }) {
     });
   }
 
-  if (!open) return null;
+  if (!mounted) return null;
 
   return (
     <div id="code-explorer" className="fixed inset-0 z-50" role="dialog" aria-modal="true" aria-labelledby="code-explorer-title">
-      <div id="code-explorer-backdrop" className="absolute inset-0 bg-black/80 backdrop-blur-md" onClick={onClose} />
+      <div
+        id="code-explorer-backdrop"
+        className={`absolute inset-0 bg-black/80 backdrop-blur-md transition-opacity duration-200 ${visible ? 'opacity-100' : 'opacity-0'}`}
+        onClick={onClose}
+      />
       <aside
         id="code-explorer-panel"
-        className="absolute right-0 top-0 flex h-full w-[min(94vw,860px)] flex-col border-l border-[var(--color-line-hi)] bg-[var(--color-panel)] shadow-2xl"
+        className={`absolute right-0 top-0 flex h-full w-[min(94vw,860px)] flex-col border-l border-[var(--color-line-hi)] bg-[var(--color-panel)] shadow-2xl transition-transform duration-200 ease-out ${
+          visible ? 'translate-x-0 opacity-100' : 'translate-x-full opacity-0'
+        }`}
       >
         <header className="flex items-center gap-2.5 border-b border-[var(--color-line)] px-4 py-3.5">
           <span className={`grid size-10 shrink-0 place-items-center rounded-xl ${

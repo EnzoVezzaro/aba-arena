@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.6]
+
+### Fixed
+- **Battle result cards now enter with the history panel's motion** — a full
+  sweep from 100% off-screen to 0 over 200ms ease-out, mirrored per card
+  (left card slides in from the left edge, right card from the right). The
+  previous approximation was a subtle 2.5rem slide + fade that read as no
+  animation at all.
+- **The file explorer (ACC files / plain files) slides like the history
+  drawer** — it now stays mounted through its exit transition (`useOverlay`,
+  same as the drawer) and slides in/out from the right over 200ms ease-out
+  with a fading backdrop, instead of popping in instantly.
+
+### Changed
+- **Header logo cleanup** — removed the bordered accent-tinted box around the
+  logo (and the inline `acc` label): the favicon badge now stands alone at
+  32px with a subtle hover scale, matching the brand mark's own badge
+  identity.
+
+---
+
 ## [0.3.5-dev-stable]
 
 ### Added

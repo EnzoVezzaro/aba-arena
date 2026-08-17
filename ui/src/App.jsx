@@ -507,11 +507,14 @@ export default function App() {
         {/* ============================== HEADER ============================== */}
         <header className="flex min-h-14 items-center justify-between gap-3 py-2.5">
           <a href="/" className="group flex min-w-0 items-center gap-3" aria-label="ABA home">
-            <span className="grid size-9 shrink-0 place-items-center rounded-[0.65rem] border border-[var(--color-accent)]/20 bg-[var(--color-accent)]/[0.06] transition-colors group-hover:border-[var(--color-accent)]/40">
-              <img src="/favicon.svg" alt="" className="size-5" />
-            </span>
+            {/* The logo stands alone — favicon.svg is already a badge (white
+                paper + crossed swords battle mark), no outer box around it. */}
+            <img
+              src="/favicon.svg"
+              alt=""
+              className="size-8 shrink-0 transition-transform duration-200 group-hover:scale-[1.04]"
+            />
             <p className="truncate text-[15px] font-bold tracking-[-0.03em] text-[var(--color-ink)] sm:text-[16px]">
-              <span className="font-pixel text-[13px] font-semibold tracking-normal text-[var(--color-accent)]">acc</span>
               <span className="ml-2">Agent Code Context</span>
               <span className="ml-2 text-[var(--color-ink-faint)]">· Battle Arena</span>
             </p>
